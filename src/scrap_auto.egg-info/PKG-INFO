@@ -1,0 +1,64 @@
+Metadata-Version: 2.4
+Name: scrap-auto
+Version: 0.1.0
+Summary: Structured crawler for auto parts catalog website
+Author: Scrap Auto Team
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: httpx[http2]>=0.27.0
+Requires-Dist: selectolax>=0.3.24
+Requires-Dist: typer>=0.12.3
+Requires-Dist: pydantic>=2.8.2
+Requires-Dist: tenacity>=8.5.0
+Requires-Dist: orjson>=3.10.6
+Requires-Dist: rich>=13.7.1
+
+# scrap_auto
+
+Python project to crawl the auto-parts catalog website in a controlled and structured way.
+
+## What this project contains
+
+- A crawler skeleton that follows the site hierarchy:
+  - manufacturers -> models -> car types -> category groups -> articles -> article details
+- Strong URL pattern parsing based on IDs embedded in paths
+- JSONL output for fast append-only exports
+- A complete execution plan in docs and an AI harness in .github
+
+## Quick start
+
+1. Create and activate a virtual environment.
+2. Install the package in editable mode:
+
+```bash
+pip install -e .
+```
+
+3. Run a small validation crawl:
+
+```bash
+scrap-auto crawl --max-manufacturers 2 --max-models-per-manufacturer 2 --max-car-types-per-model 2 --max-groups-per-car-type 2 --max-articles-per-group 5
+```
+
+4. Run URL/HTML extraction checks:
+
+```bash
+scrap-auto validate
+```
+
+## Important notes
+
+- Respect website terms and robots policy before large-scale crawling.
+- Use conservative rate limits and retries.
+- Persist progress often; this dataset can become very large.
+
+## Output
+
+By default, JSONL artifacts are written to:
+
+- data/manufacturers.jsonl
+- data/models.jsonl
+- data/car_types.jsonl
+- data/category_groups.jsonl
+- data/articles.jsonl
+- data/article_details.jsonl

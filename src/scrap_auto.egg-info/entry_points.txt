@@ -1,0 +1,2 @@
+[console_scripts]
+scrap-auto = scrap_auto.cli:app

@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/scrap_auto/__init__.py
+src/scrap_auto/cli.py
+src/scrap_auto/crawler.py
+src/scrap_auto/fetcher.py
+src/scrap_auto/parser.py
+src/scrap_auto/settings.py
+src/scrap_auto/storage.py
+src/scrap_auto/url_patterns.py
+src/scrap_auto.egg-info/PKG-INFO
+src/scrap_auto.egg-info/SOURCES.txt
+src/scrap_auto.egg-info/dependency_links.txt
+src/scrap_auto.egg-info/entry_points.txt
+src/scrap_auto.egg-info/requires.txt
+src/scrap_auto.egg-info/top_level.txt

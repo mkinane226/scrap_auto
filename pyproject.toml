@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrap-auto"
+version = "0.1.0"
+description = "Structured crawler for auto parts catalog website"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Scrap Auto Team" }]
+dependencies = [
+  "httpx[http2]>=0.27.0",
+  "selectolax>=0.3.24",
+  "typer>=0.12.3",
+  "pydantic>=2.8.2",
+  "tenacity>=8.5.0",
+  "orjson>=3.10.6",
+  "rich>=13.7.1"
+]
+
+[project.scripts]
+scrap-auto = "scrap_auto.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
