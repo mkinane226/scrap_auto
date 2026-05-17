@@ -97,7 +97,6 @@ source venv/bin/activate
 # Full crawl — all 63 manufacturers, no limits
 # Output goes to the terminal AND to crawl_initial.log
 scrap-auto crawl \
-    --manufacturers-file data/manufaturers.txt \
     --verbose \
     --progress-every 100 \
     2>&1 | tee logs/crawl_initial.log

@@ -34,10 +34,15 @@ else
     echo "  Database 'autoparts' already exists — skipping"
 fi
 
-# Grants
+# Grants on database
 sudo -u postgres psql <<SQL
 GRANT ALL PRIVILEGES ON DATABASE autoparts TO autoparts_loader;
 GRANT CONNECT ON DATABASE autoparts TO autoparts_api;
+SQL
+
+# Grant CREATE on public schema (required on PostgreSQL 15+ where it's revoked by default)
+sudo -u postgres psql -d autoparts <<SQL
+GRANT ALL ON SCHEMA public TO autoparts_loader;
 SQL
 
 echo "=== [2/3] Allow password auth for autoparts users in pg_hba.conf ==="
