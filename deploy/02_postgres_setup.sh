@@ -10,14 +10,18 @@ API_PASS="${AUTOPARTS_API_PASS:-CHANGE_ME_API}"
 
 echo "=== [1/3] Create PostgreSQL roles and database ==="
 
-# Roles — safe to run inside a transaction block
+# Roles — create if missing, always sync password
 sudo -u postgres psql <<SQL
 DO \$\$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'autoparts_loader') THEN
     CREATE USER autoparts_loader WITH PASSWORD '${LOADER_PASS}';
+  ELSE
+    ALTER USER autoparts_loader WITH PASSWORD '${LOADER_PASS}';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'autoparts_api') THEN
     CREATE USER autoparts_api WITH PASSWORD '${API_PASS}';
+  ELSE
+    ALTER USER autoparts_api WITH PASSWORD '${API_PASS}';
   END IF;
 END \$\$;
 SQL
