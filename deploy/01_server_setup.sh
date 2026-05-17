@@ -11,7 +11,8 @@ ODOO_USER="odoo"
 
 echo "=== [1/4] System dependencies ==="
 apt-get update -q
-apt-get install -y python3.11 python3.11-venv python3.11-dev git
+# Ubuntu 24.04 ships python3 = 3.12 — compatible with our >=3.11 requirement
+apt-get install -y python3 python3-venv python3-dev python3-pip git
 
 echo "=== [2/4] Project directories ==="
 mkdir -p "$INSTALL_DIR"/{repo,data,logs}
@@ -26,7 +27,7 @@ else
 fi
 
 echo "=== [4/4] Python virtualenv + install ==="
-sudo -u "$ODOO_USER" python3.11 -m venv "$INSTALL_DIR/venv"
+sudo -u "$ODOO_USER" python3 -m venv "$INSTALL_DIR/venv"
 sudo -u "$ODOO_USER" "$INSTALL_DIR/venv/bin/pip" install --upgrade pip wheel
 sudo -u "$ODOO_USER" "$INSTALL_DIR/venv/bin/pip" install -e "$INSTALL_DIR/repo[api]"
 
