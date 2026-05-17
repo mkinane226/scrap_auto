@@ -14,6 +14,7 @@ from .crawler import Crawler, config_to_dict
 from .settings import CrawlConfig, CrawlLimits
 from .url_patterns import (
     parse_article_details_url,
+    parse_car_type_details_url,
     parse_category_page_url,
     parse_list_articles_url,
     parse_manufacturer_url,
@@ -33,6 +34,19 @@ def crawl(
     max_car_types_per_model: int | None = None,
     max_groups_per_car_type: int | None = None,
     max_articles_per_group: int | None = None,
+    min_year_to_include: int = typer.Option(
+        2006,
+        min=1900,
+        help="Skip extraction for car types where manufacturing end year is lower than this value.",
+    ),
+    manufacturers_file: Path | None = typer.Option(
+        None,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=False,
+        help="Only crawl manufacturers equal or similar to names listed in this file. If omitted, all manufacturers are crawled.",
+    ),
     verbose: bool = typer.Option(False, help="Print live progress while crawling."),
     progress_every: int = typer.Option(25, min=1, help="Report progress every N records."),
 ) -> None:
@@ -40,6 +54,8 @@ def crawl(
         lang_id=lang_id,
         country_id=country_id,
         type_id=type_id,
+        min_year_to_include=min_year_to_include,
+        manufacturers_file=manufacturers_file,
         verbose=verbose,
         progress_every=progress_every,
     )
@@ -69,6 +85,7 @@ def validate() -> None:
     samples = {
         "manufacturer": "https://auto-parts-catalog.makingdatameaningful.com/models/manufacturer-id-5/lang-id-6/country-filter-id-145/type-id-1",
         "model_series": "https://auto-parts-catalog.makingdatameaningful.com/passenger-car-types/53/manufacturer-id-5/lang-id-6/country-filter-id-145/type-id-1",
+        "car_type_details": "https://auto-parts-catalog.makingdatameaningful.com/passenger-car-type-details/12424/manufacturer-id-609/lang-id-6/country-filter-id-145",
         "category": "https://auto-parts-catalog.makingdatameaningful.com/list-category-products-groups/1146/manufacturer-id-5/lang-id-6/country-filter-id-145/type-id-1",
         "list_articles": "https://auto-parts-catalog.makingdatameaningful.com/list-articles/1146/100253/manufacturer-id-5/lang-id-6/country-filter-id-145/type-id-1",
         "article_details": "https://auto-parts-catalog.makingdatameaningful.com/article-details/8373643/model-series-id-53/manufacturer-id-5/lang-id-6/country-filter-id-145/type-id-1",
@@ -77,6 +94,7 @@ def validate() -> None:
     checks = {
         "manufacturer": parse_manufacturer_url(samples["manufacturer"]),
         "model_series": parse_model_series_url(samples["model_series"]),
+        "car_type_details": parse_car_type_details_url(samples["car_type_details"]),
         "category": parse_category_page_url(samples["category"]),
         "list_articles": parse_list_articles_url(samples["list_articles"]),
         "article_details": parse_article_details_url(samples["article_details"]),
@@ -225,6 +243,88 @@ def _guess_ext(url: str) -> str:
         if lowered.endswith(ext):
             return ext
     return ".bin"
+
+
+@app.command()
+def convert(
+    data_dir: str = typer.Option("data", help="Directory containing JSONL output files."),
+    output_dir: str = typer.Option("data/parquet", help="Directory for Parquet output."),
+    crawl_date: str = typer.Option("", help="Crawl date label for partition (e.g. 2026-05-16). Defaults to today."),
+) -> None:
+    """Convert JSONL output files to partitioned Parquet using Polars (streaming, handles large files)."""
+    import datetime
+
+    import polars as pl
+
+    from rich.console import Console as RichConsole
+
+    console = RichConsole()
+
+    if not crawl_date:
+        crawl_date = datetime.date.today().isoformat()
+
+    data_path = Path(data_dir)
+    out_path = Path(output_dir)
+
+    entity_types = [
+        "manufacturers",
+        "models",
+        "car_types",
+        "car_type_details",
+        "category_groups",
+        "articles",
+        "article_details",
+    ]
+
+    for entity in entity_types:
+        src = data_path / f"{entity}.jsonl"
+        if not src.exists():
+            console.print(f"[yellow]Skipping {entity} — {src} not found[/yellow]")
+            continue
+
+        partition_dir = out_path / f"entity_type={entity}" / f"crawl_date={crawl_date}"
+        partition_dir.mkdir(parents=True, exist_ok=True)
+        dest = partition_dir / "part-0.parquet"
+
+        console.print(f"[cyan]Converting[/cyan] {src} → {dest}")
+        try:
+            lf = pl.scan_ndjson(src)
+            lf.sink_parquet(dest, compression="zstd")
+            console.print(f"[green]Done[/green] {entity}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Failed {entity}[/red] :: {exc}")
+
+    console.print("[bold green]Conversion complete[/bold green]")
+
+
+@app.command("dedup")
+def dedup(
+    data_dir: str = typer.Option("data/parquet", help="Parquet data directory."),
+) -> None:
+    """Deduplicate articles and article_details by article_id using DuckDB."""
+    import duckdb
+
+    from rich.console import Console as RichConsole
+
+    console = RichConsole()
+    con = duckdb.connect()
+
+    for entity in ("articles", "article_details"):
+        glob = f"{data_dir}/entity_type={entity}/**/*.parquet"
+        out = f"{data_dir}/{entity}_deduped.parquet"
+        console.print(f"[cyan]Deduplicating[/cyan] {entity}")
+        try:
+            con.execute(
+                f"COPY (SELECT DISTINCT ON (article_id) * FROM read_parquet('{glob}', hive_partitioning=true)"
+                f" ORDER BY article_id)"
+                f" TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
+            console.print(f"[green]Done[/green] → {out}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Failed {entity}[/red] :: {exc}")
+
+    con.close()
+    console.print("[bold green]Dedup complete[/bold green]")
 
 
 if __name__ == "__main__":

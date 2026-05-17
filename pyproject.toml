@@ -16,7 +16,10 @@ dependencies = [
   "pydantic>=2.8.2",
   "tenacity>=8.5.0",
   "orjson>=3.10.6",
-  "rich>=13.7.1"
+  "rich>=13.7.1",
+  "aiosqlite>=0.21.0",
+  "polars>=1.0.0",
+  "duckdb>=1.1.0"
 ]
 
 [project.scripts]

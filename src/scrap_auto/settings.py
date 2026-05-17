@@ -18,6 +18,8 @@ class CrawlConfig:
     output_dir: Path = Path("data")
     verbose: bool = False
     progress_every: int = 25
+    min_year_to_include: int = 2006
+    manufacturers_file: Path | None = None
 
 
 @dataclass(slots=True)

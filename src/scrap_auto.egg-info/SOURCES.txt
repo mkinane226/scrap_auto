@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 src/scrap_auto/__init__.py
+src/scrap_auto/checkpoint.py
 src/scrap_auto/cli.py
 src/scrap_auto/crawler.py
 src/scrap_auto/fetcher.py

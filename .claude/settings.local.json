@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:auto-parts-catalog.makingdatameaningful.com)",
+      "Bash(Get-ChildItem -Path \"c:\\\\dev\\\\scrap_auto\" -Recurse -Filter \"*.toml\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 20)",
+      "WebSearch",
+      "PowerShell($ProgressPreference = 'SilentlyContinue'; $html = \\(Invoke-WebRequest -Uri 'https://auto-parts-catalog.makingdatameaningful.com/list-articles/108575/101779/manufacturer-id-36/lang-id-6/country-filter-id-145/type-id-1' -UseBasicParsing\\).Content; $html.Substring\\(0, 15000\\) | Select-String 'colman' -Context 5)",
+      "Bash(scrap-auto validate *)"
+    ]
+  }
+}
