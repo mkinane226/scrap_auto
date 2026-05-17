@@ -20,6 +20,8 @@ Build a resilient crawler for auto-parts-catalog.makingdatameaningful.com with s
 - Include only manufacturers equal or similar to names in manufaturers.txt (normalized matching). --manufacturers-file is optional.
 - Collect only S3 article images (filter src to s3.us-east-1.amazonaws.com / auto-car-parts).
 - compatible_cars table has 8 columns — always extract extra_qualifier (column 8).
+- Crawl both list-articles and list-oem-articles URLs for each category group. Set `is_oem=True` on articles from list-oem-articles. Same article_id can appear in both — dedup handles it post-crawl.
+- Category groups use Bootstrap accordion: `div.accordion-item` → `button.accordion-button` (primary), `div.col-sm-12.col-md-3` (sub), `ul li` (sub-sub).
 
 ## Architecture
 
@@ -27,8 +29,10 @@ Build a resilient crawler for auto-parts-catalog.makingdatameaningful.com with s
 - checkpoint.py: CheckpointManager — aiosqlite SQLite WAL DB. is_seen() / mark_seen() called in _try_fetch for every URL.
 - storage.py: JsonlStore — file handles kept open for crawl lifetime; call store.close() to flush.
 - parser.py: pure selectolax parse_* functions. No side effects. article_id from URL regex _ARTICLE_ID_FROM_URL_RE.
-- url_patterns.py: regex ParsedIds + is_in_scope() with regex guards.
-- cli.py: Typer app — crawl, validate, export-images, convert, dedup.
+- url_patterns.py: regex ParsedIds + is_in_scope() with regex guards. Includes parse_list_oem_articles_url().
+- loader.py: load_all() — reads deduped Parquet, batch-UPSERTs into PostgreSQL (articles, article_details, compatible_cars). Idempotent.
+- api.py: FastAPI app — /health, /search (FTS + car filter), /article/{id}, /compatible/{id}, /manufacturers, /models/{name}. asyncpg pool, X-API-Key auth.
+- cli.py: Typer app — crawl, validate, convert, dedup, load.
 
 ## Code style
 
@@ -60,8 +64,19 @@ Build a resilient crawler for auto-parts-catalog.makingdatameaningful.com with s
 During crawl: JSONL files in data/
 Post-crawl:
 1. `scrap-auto convert` → partitioned Parquet in data/parquet/ (polars streaming, handles 25 GB)
-2. `scrap-auto dedup` → DuckDB DISTINCT ON article_id → deduped Parquet
-3. For reading large files: use DuckDB read_ndjson() or read_parquet() — never open in editor
+2. `scrap-auto dedup` → DuckDB DISTINCT ON article_id → articles_deduped.parquet + article_details_deduped.parquet
+3. `scrap-auto load --data-dir data` → PostgreSQL UPSERT (requires AUTOPARTS_DATABASE_URL env var)
+4. For reading large files: use DuckDB read_ndjson() or read_parquet() — never open in editor
+
+## Production deployment
+
+- Server: Hetzner CPX31, Ubuntu 24.04, same host as Odoo 18 (i2doo)
+- PostgreSQL 16: database `autoparts`, users `autoparts_loader` (write) + `autoparts_api` (read-only)
+- FastAPI API: uvicorn on 127.0.0.1:8090, 2 workers, systemd service `scrap-auto-api`
+- Nginx: proxies /api/autoparts/ → 127.0.0.1:8090 with rate limiting (60 req/min)
+- Weekly crawl: systemd timer `scrap-auto-crawl.timer` fires Sunday 02:00, runs full pipeline
+- Deploy scripts: deploy/01_server_setup.sh, deploy/02_postgres_setup.sh (curl from GitHub, no local copy needed)
+- Connection strings use keyword=value DSN or URL with percent-encoded passwords — avoid @ and $ in passwords
 
 ## Before merge checklist
 
