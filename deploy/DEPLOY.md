@@ -38,16 +38,15 @@ sudo -u odoo /opt/scrap_auto/venv/bin/scrap-auto validate
 
 ## Step 2 — PostgreSQL Database
 
-Choose strong passwords, then run:
+On the server, as root — set your passwords and run:
 ```bash
-export AUTOPARTS_LOADER_PASS="choose_a_strong_password_here"
-export AUTOPARTS_API_PASS="choose_another_strong_password_here"
+export AUTOPARTS_LOADER_PASS="Kinane@@2026$$"
+export AUTOPARTS_API_PASS="Kinane@@2026$$"
 
-scp -P 2222 deploy/02_postgres_setup.sh root@YOUR_SERVER_IP:/tmp/
-ssh -p 2222 root@YOUR_SERVER_IP \
-    AUTOPARTS_LOADER_PASS="$AUTOPARTS_LOADER_PASS" \
-    AUTOPARTS_API_PASS="$AUTOPARTS_API_PASS" \
-    bash /tmp/02_postgres_setup.sh
+curl -fsSL https://raw.githubusercontent.com/mkinane226/scrap_auto/main/deploy/02_postgres_setup.sh -o /tmp/02_postgres_setup.sh
+AUTOPARTS_LOADER_PASS="$AUTOPARTS_LOADER_PASS" \
+AUTOPARTS_API_PASS="$AUTOPARTS_API_PASS" \
+bash /tmp/02_postgres_setup.sh
 ```
 
 **Verify:**

@@ -9,8 +9,9 @@ LOADER_PASS="${AUTOPARTS_LOADER_PASS:-CHANGE_ME_LOADER}"
 API_PASS="${AUTOPARTS_API_PASS:-CHANGE_ME_API}"
 
 echo "=== [1/3] Create PostgreSQL roles and database ==="
+
+# Roles — safe to run inside a transaction block
 sudo -u postgres psql <<SQL
--- Roles
 DO \$\$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'autoparts_loader') THEN
     CREATE USER autoparts_loader WITH PASSWORD '${LOADER_PASS}';
@@ -19,21 +20,18 @@ DO \$\$ BEGIN
     CREATE USER autoparts_api WITH PASSWORD '${API_PASS}';
   END IF;
 END \$\$;
+SQL
 
--- Database (fr_FR locale to match existing server locale)
-SELECT 'Database already exists' WHERE EXISTS (
-    SELECT 1 FROM pg_database WHERE datname = 'autoparts'
-)
-\gset
-DO \$\$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'autoparts') THEN
-    PERFORM dblink_exec(
-      'dbname=postgres',
-      'CREATE DATABASE autoparts ENCODING ''UTF8'' LC_COLLATE ''fr_FR.UTF-8'' LC_CTYPE ''fr_FR.UTF-8'' TEMPLATE template0'
-    );
-  END IF;
-END \$\$;
+# CREATE DATABASE cannot run inside a transaction block — run it as a top-level statement
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='autoparts'" | grep -q 1; then
+    sudo -u postgres psql -c "CREATE DATABASE autoparts ENCODING 'UTF8' LC_COLLATE 'fr_FR.UTF-8' LC_CTYPE 'fr_FR.UTF-8' TEMPLATE template0"
+    echo "  Database 'autoparts' created"
+else
+    echo "  Database 'autoparts' already exists — skipping"
+fi
 
+# Grants
+sudo -u postgres psql <<SQL
 GRANT ALL PRIVILEGES ON DATABASE autoparts TO autoparts_loader;
 GRANT CONNECT ON DATABASE autoparts TO autoparts_api;
 SQL
