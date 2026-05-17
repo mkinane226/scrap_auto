@@ -40,8 +40,8 @@ sudo -u odoo /opt/scrap_auto/venv/bin/scrap-auto validate
 
 On the server, as root — set your passwords and run:
 ```bash
-export AUTOPARTS_LOADER_PASS="Kinane@@2026$$"
-export AUTOPARTS_API_PASS="Kinane@@2026$$"
+export AUTOPARTS_LOADER_PASS='Kinane@@2026$$'
+export AUTOPARTS_API_PASS='Kinane@@2026$$'
 
 curl -fsSL https://raw.githubusercontent.com/mkinane226/scrap_auto/main/deploy/02_postgres_setup.sh -o /tmp/02_postgres_setup.sh
 AUTOPARTS_LOADER_PASS="$AUTOPARTS_LOADER_PASS" \

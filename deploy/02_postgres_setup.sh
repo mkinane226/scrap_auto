@@ -50,7 +50,9 @@ HBA
 fi
 
 echo "=== [3/3] Initialize schema via scrap-auto ==="
-LOADER_URL="postgresql://autoparts_loader:${LOADER_PASS}@localhost/autoparts"
+# URL-encode the password so special chars (@, $, etc.) don't break the connection string
+LOADER_PASS_ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${LOADER_PASS}")
+LOADER_URL="postgresql://autoparts_loader:${LOADER_PASS_ENCODED}@localhost/autoparts"
 sudo -u odoo /opt/scrap_auto/venv/bin/scrap-auto load \
     --database-url "$LOADER_URL" \
     --data-dir /opt/scrap_auto/data \
