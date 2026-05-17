@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly auto parts crawl — every Sunday at 02:00
+
+[Timer]
+# Fire every Sunday at 02:00 local time
+OnCalendar=Sun *-*-* 02:00:00
+# Re-fire if server was off at the scheduled time
+Persistent=true
+# Spread start up to 10 minutes to avoid hitting the site at exactly midnight
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

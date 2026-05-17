@@ -1,0 +1,40 @@
+[Unit]
+Description=Auto Parts — full crawl + convert + dedup + load pipeline
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=odoo
+Group=odoo
+WorkingDirectory=/opt/scrap_auto
+
+# ── Loader password — must match 02_postgres_setup.sh ──
+Environment=AUTOPARTS_DATABASE_URL=postgresql://autoparts_loader:CHANGE_ME_LOADER@localhost/autoparts
+
+ExecStart=/bin/bash -c '\
+    set -euo pipefail && \
+    source /opt/scrap_auto/venv/bin/activate && \
+    cd /opt/scrap_auto && \
+    echo "=== Crawl started $(date) ===" >> logs/crawl.log && \
+    scrap-auto crawl \
+        --manufacturers-file data/manufaturers.txt \
+        --verbose \
+        --progress-every 100 \
+        >> logs/crawl.log 2>&1 && \
+    echo "=== Convert started $(date) ===" >> logs/crawl.log && \
+    scrap-auto convert >> logs/crawl.log 2>&1 && \
+    echo "=== Dedup started $(date) ===" >> logs/crawl.log && \
+    scrap-auto dedup   >> logs/crawl.log 2>&1 && \
+    echo "=== Load started $(date) ===" >> logs/crawl.log && \
+    scrap-auto load --data-dir data >> logs/crawl.log 2>&1 && \
+    echo "=== Pipeline complete $(date) ===" >> logs/crawl.log \
+'
+
+StandardOutput=append:/opt/scrap_auto/logs/crawl.log
+StandardError=append:/opt/scrap_auto/logs/crawl.log
+
+# 12 hours is enough for 63 manufacturers at 300ms–1s delay, 5 concurrent
+TimeoutStartSec=43200
+
+[Install]
+WantedBy=multi-user.target

@@ -297,6 +297,31 @@ def convert(
     console.print("[bold green]Conversion complete[/bold green]")
 
 
+@app.command()
+def load(
+    database_url: str = typer.Option(
+        ...,
+        envvar="AUTOPARTS_DATABASE_URL",
+        help="PostgreSQL connection string. E.g. postgresql://user:pass@localhost/autoparts",
+    ),
+    data_dir: Path = typer.Option(Path("data"), help="Directory containing Parquet output files."),
+    init: bool = typer.Option(False, "--init", help="Create database schema before loading."),
+    grant_api: bool = typer.Option(
+        False, "--grant-api", help="Grant SELECT to autoparts_api role after loading."
+    ),
+    batch_size: int = typer.Option(1000, help="Rows per batch for UPSERT."),
+) -> None:
+    """Load deduped Parquet files into PostgreSQL (run after 'scrap-auto dedup')."""
+    from rich.console import Console as RichConsole
+
+    from .loader import load_all
+
+    console = RichConsole()
+    db_display = database_url.split("@")[-1] if "@" in database_url else database_url
+    console.print(f"[bold]Loading data:[/bold] {data_dir} → {db_display}")
+    load_all(database_url, data_dir, batch_size, init, grant_api, console)
+
+
 @app.command("dedup")
 def dedup(
     data_dir: str = typer.Option("data/parquet", help="Parquet data directory."),

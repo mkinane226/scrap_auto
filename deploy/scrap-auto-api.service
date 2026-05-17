@@ -1,0 +1,34 @@
+[Unit]
+Description=Auto Parts Search API (FastAPI + uvicorn)
+Documentation=https://github.com/mkinane226/scrap_auto
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=odoo
+Group=odoo
+WorkingDirectory=/opt/scrap_auto
+
+# ── Secrets — change both values before enabling ──
+Environment=AUTOPARTS_DATABASE_URL=postgresql://autoparts_api:CHANGE_ME_API@localhost/autoparts
+Environment=AUTOPARTS_API_KEY=CHANGE_ME_STRONG_KEY_HERE
+
+ExecStart=/opt/scrap_auto/venv/bin/uvicorn scrap_auto.api:app \
+    --host 127.0.0.1 \
+    --port 8090 \
+    --workers 2 \
+    --log-level info
+
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/scrap_auto/logs/api.log
+StandardError=append:/opt/scrap_auto/logs/api.log
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

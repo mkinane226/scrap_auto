@@ -19,7 +19,15 @@ dependencies = [
   "rich>=13.7.1",
   "aiosqlite>=0.21.0",
   "polars>=1.0.0",
-  "duckdb>=1.1.0"
+  "duckdb>=1.1.0",
+  "psycopg[binary]>=3.2"
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "asyncpg>=0.29"
 ]
 
 [project.scripts]
