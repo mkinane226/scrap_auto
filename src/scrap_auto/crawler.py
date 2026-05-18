@@ -49,6 +49,10 @@ class Crawler:
         self._manufacturer_allowlist = self._load_manufacturer_allowlist(config.manufacturers_file)
         checkpoint_db = config.output_dir / "checkpoint.db"
         self.checkpoint = CheckpointManager(checkpoint_db)
+        # In-memory dedup for navigation pages within one session.
+        # Navigation pages bypass the cross-session checkpoint so that children
+        # not yet processed in a previous session are always discovered.
+        self._session_fetched: set[str] = set()
 
     async def close(self) -> None:
         await self.fetcher.close()
@@ -77,7 +81,7 @@ class Crawler:
             f"lang-id-{self.config.lang_id}/country-filter-id-{self.config.country_id}/type-id-{self.config.type_id}"
         )
 
-        manufacturers_html = await self._try_fetch(start_url, counters)
+        manufacturers_html = await self._fetch_navigation(start_url, counters)
         if not manufacturers_html:
             return counters
 
@@ -116,7 +120,7 @@ class Crawler:
         counters["records_written"] += 1
         self._maybe_log_progress(counters)
 
-        models_html = await self._try_fetch(manufacturer["url"], counters)
+        models_html = await self._fetch_navigation(manufacturer["url"], counters)
         if not models_html:
             return
 
@@ -142,7 +146,7 @@ class Crawler:
         counters["records_written"] += 1
         self._maybe_log_progress(counters)
 
-        car_types_html = await self._try_fetch(model["url"], counters)
+        car_types_html = await self._fetch_navigation(model["url"], counters)
         if not car_types_html:
             return
 
@@ -216,7 +220,7 @@ class Crawler:
             if not ids_c:
                 continue
 
-            category_html = await self._try_fetch(category_url, counters)
+            category_html = await self._fetch_navigation(category_url, counters)
             if not category_html:
                 continue
 
@@ -305,6 +309,28 @@ class Crawler:
             raise ValueError(f"Out-of-scope URL blocked: {normalized_url}")
         async with self.sem:
             return await self.fetcher.get_text(normalized_url)
+
+    async def _fetch_navigation(self, url: str, counters: dict[str, int]) -> str | None:
+        """Fetch a navigation/index page, bypassing the cross-session checkpoint.
+
+        Navigation pages must always be re-traversed so children not yet
+        processed in a previous session are still discovered. Within a single
+        session each URL is fetched at most once via _session_fetched.
+        """
+        normalized = normalize_url(url)
+        if normalized in self._session_fetched:
+            counters["skipped_seen"] += 1
+            return None
+        try:
+            text = await self._fetch(url)
+            self._session_fetched.add(normalized)
+            await self.checkpoint.mark_seen(normalized, 200)
+            return text
+        except (httpx.HTTPError, httpx.RequestError, asyncio.TimeoutError, ValueError) as exc:
+            counters["failed_requests"] += 1
+            console.print(f"[yellow]Fetch failed[/yellow] {url} :: {exc}")
+            await self.checkpoint.mark_seen(normalized, 0, str(exc))
+            return None
 
     async def _try_fetch(self, url: str, counters: dict[str, int]) -> str | None:
         normalized = normalize_url(url)
