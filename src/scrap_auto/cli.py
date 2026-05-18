@@ -293,6 +293,8 @@ def convert(
             con = duckdb.connect()
             con.execute(f"SET memory_limit='{memory_limit}'")
             con.execute(f"SET temp_directory='{temp_dir}'")
+            con.execute("SET preserve_insertion_order=false")
+            con.execute("SET threads=2")
             con.execute(f"""
                 COPY (
                     SELECT * FROM read_ndjson(
