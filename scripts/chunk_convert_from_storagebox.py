@@ -23,7 +23,7 @@ SSH_KEY = "/root/.ssh/storagebox"
 REMOTE_FILE = "scrap_auto/jsonl_round1/article_details.jsonl"
 
 OUT_DIR = Path("data/parquet/entity_type=article_details/crawl_date=2026-05-18")
-CHUNK_LINES = 3000   # ~2.7 GB per chunk — safe for 8 GB RAM
+CHUNK_LINES = 1000   # ~900 MB per chunk — safe for 8 GB RAM with other processes
 TEMP_CHUNK = Path("/tmp/ad_chunk.jsonl")
 
 def main() -> None:
