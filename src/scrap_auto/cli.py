@@ -250,11 +250,12 @@ def convert(
     data_dir: str = typer.Option("data", help="Directory containing JSONL output files."),
     output_dir: str = typer.Option("data/parquet", help="Directory for Parquet output."),
     crawl_date: str = typer.Option("", help="Crawl date label for partition (e.g. 2026-05-16). Defaults to today."),
+    memory_limit: str = typer.Option("3GB", help="DuckDB memory limit. Excess spills to temp dir."),
+    temp_dir: str = typer.Option("/tmp/duckdb_convert", help="Temp dir for DuckDB spill-to-disk."),
 ) -> None:
-    """Convert JSONL output files to partitioned Parquet using Polars (streaming, handles large files)."""
+    """Convert JSONL output files to partitioned Parquet using DuckDB (spills to disk, handles any size)."""
     import datetime
-
-    import polars as pl
+    import duckdb
 
     from rich.console import Console as RichConsole
 
@@ -265,6 +266,7 @@ def convert(
 
     data_path = Path(data_dir)
     out_path = Path(output_dir)
+    Path(temp_dir).mkdir(parents=True, exist_ok=True)
 
     entity_types = [
         "manufacturers",
@@ -288,8 +290,20 @@ def convert(
 
         console.print(f"[cyan]Converting[/cyan] {src} → {dest}")
         try:
-            lf = pl.scan_ndjson(src)
-            lf.sink_parquet(dest, compression="zstd")
+            con = duckdb.connect()
+            con.execute(f"SET memory_limit='{memory_limit}'")
+            con.execute(f"SET temp_directory='{temp_dir}'")
+            con.execute(f"""
+                COPY (
+                    SELECT * FROM read_ndjson(
+                        '{src}',
+                        auto_detect=True,
+                        maximum_object_size=33554432
+                    )
+                )
+                TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+            con.close()
             console.print(f"[green]Done[/green] {entity}")
         except Exception as exc:  # noqa: BLE001
             console.print(f"[red]Failed {entity}[/red] :: {exc}")
