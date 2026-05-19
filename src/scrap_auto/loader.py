@@ -195,19 +195,19 @@ def _load_articles(conn: Any, path: Path, batch_size: int, console: Any) -> None
 
 
 def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) -> None:
-    import polars as pl
+    import pyarrow.parquet as pq
 
     console.print("[cyan]Loading article details → autoparts_article_details + compatible_cars[/cyan]")
-    df = pl.read_parquet(path)
-    total = len(df)
+    pf = pq.ParquetFile(path)
+    total = pf.metadata.num_rows
     loaded = 0
 
-    for start in range(0, total, batch_size):
+    for batch in pf.iter_batches(batch_size=batch_size):
         detail_rows = []
         compat_rows: list[tuple] = []
         batch_article_ids: list[int] = []
 
-        for r in df.slice(start, batch_size).to_dicts():
+        for r in batch.to_pylist():
             article_id = _int(r.get("article_id"))
             if article_id is None:
                 continue
@@ -232,8 +232,8 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
                     car.get("manufacturer_name") or "",
                     car.get("model_name") or "",
                     car.get("engine_or_variant") or "",
-                    car.get("year_from") or "",
-                    car.get("year_to") or "",
+                    _str(car.get("year_from")),
+                    _str(car.get("year_to")),
                     car.get("extra_qualifier") or "",
                 ))
 
@@ -252,6 +252,14 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
         console.print(f"  details {loaded}/{total}")
 
     console.print(f"[green]Article details loaded: {loaded}[/green]")
+
+
+def _str(v: Any) -> str:
+    if v is None:
+        return ""
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    return str(v) if v else ""
 
 
 def _int(v: Any) -> int | None:
