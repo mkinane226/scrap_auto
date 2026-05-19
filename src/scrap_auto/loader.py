@@ -198,9 +198,16 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
     import pyarrow.parquet as pq
 
     console.print("[cyan]Loading article details → autoparts_article_details + compatible_cars[/cyan]")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT article_id FROM autoparts_articles")
+        valid_article_ids: set[int] = {row[0] for row in cur.fetchall()}
+    console.print(f"  Valid parent articles: {len(valid_article_ids)}")
+
     pf = pq.ParquetFile(path)
     total = pf.metadata.num_rows
     loaded = 0
+    skipped_fk = 0
 
     for batch in pf.iter_batches(batch_size=batch_size):
         detail_rows = []
@@ -210,6 +217,9 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
         for r in batch.to_pylist():
             article_id = _int(r.get("article_id"))
             if article_id is None:
+                continue
+            if article_id not in valid_article_ids:
+                skipped_fk += 1
                 continue
 
             batch_article_ids.append(article_id)
@@ -252,6 +262,8 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
         console.print(f"  details {loaded}/{total}")
 
     console.print(f"[green]Article details loaded: {loaded}[/green]")
+    if skipped_fk:
+        console.print(f"[yellow]Skipped {skipped_fk} details with no parent article (FK)[/yellow]")
 
 
 def _str(v: Any) -> str:
