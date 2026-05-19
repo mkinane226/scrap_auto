@@ -363,7 +363,7 @@ def dedup(
         console.print(f"[cyan]Deduplicating[/cyan] {entity}")
         try:
             con.execute(
-                f"COPY (SELECT DISTINCT ON (article_id) * FROM read_parquet('{glob}', hive_partitioning=true)"
+                f"COPY (SELECT DISTINCT ON (article_id) * FROM read_parquet('{glob}')"
                 f" ORDER BY article_id)"
                 f" TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
             )
