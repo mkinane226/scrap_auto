@@ -341,6 +341,8 @@ def load(
 @app.command("dedup")
 def dedup(
     data_dir: str = typer.Option("data/parquet", help="Parquet data directory."),
+    memory_limit: str = typer.Option("4GB", help="DuckDB memory limit."),
+    temp_dir: str = typer.Option("/tmp/duckdb_dedup", help="Temp dir for DuckDB spill-to-disk."),
 ) -> None:
     """Deduplicate articles and article_details by article_id using DuckDB."""
     import duckdb
@@ -348,7 +350,12 @@ def dedup(
     from rich.console import Console as RichConsole
 
     console = RichConsole()
+    Path(temp_dir).mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
+    con.execute(f"SET memory_limit='{memory_limit}'")
+    con.execute(f"SET temp_directory='{temp_dir}'")
+    con.execute("SET preserve_insertion_order=false")
+    con.execute("SET threads=2")
 
     for entity in ("articles", "article_details"):
         glob = f"{data_dir}/entity_type={entity}/**/*.parquet"
