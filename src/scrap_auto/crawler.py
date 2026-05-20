@@ -374,7 +374,8 @@ class Crawler:
             f"groups={counters['category_groups']} "
             f"articles={counters['articles']} "
             f"details={counters['article_details']} "
-            f"failed_requests={counters['failed_requests']}"
+            f"failed_requests={counters['failed_requests']} "
+            f"skipped_seen={counters['skipped_seen']}"
         )
 
     def _should_skip_year_to(self, year_to: Any) -> bool:
