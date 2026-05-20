@@ -330,12 +330,13 @@ def _parse_interval_years(text: str) -> tuple[int | None, int | None]:
 
 
 def parse_year_range(text: str) -> tuple[int | None, int | None]:
-    years = re.findall(r"(\d{4})", text)
+    # TecDoc concatenates ISO dates without separator: "YYYY-MM-DDYYYY-MM-DD"
+    # Insert a space at the join so both years are extracted correctly.
+    text = re.sub(r"(\d{4}-\d{2}-\d{2})(\d{4})", r"\1 \2", text)
+    years = [int(y) for y in re.findall(r"(\d{4})", text) if 1800 <= int(y) <= 2100]
     if not years:
         return None, None
-    year_from = safe_int(years[0])
-    year_to = safe_int(years[1]) if len(years) > 1 else None
-    return year_from, year_to
+    return years[0], (years[1] if len(years) > 1 else None)
 
 
 def _extract_text(pattern: str, text: str) -> str:

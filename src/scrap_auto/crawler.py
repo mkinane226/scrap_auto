@@ -169,12 +169,6 @@ class Crawler:
 
             if self._should_skip_year_to(year_to):
                 counters["filtered_car_types"] += 1
-                if counters["filtered_car_types"] <= 10:
-                    console.print(
-                        f"[yellow]DBG filtered[/yellow] year_to={year_to!r}"
-                        f" year_range={car_type.get('year_range')!r}"
-                        f" type_label={car_type.get('type_label')!r}"
-                    )
                 continue
 
             if not car_type.get("category_url"):
