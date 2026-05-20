@@ -145,39 +145,19 @@ Verify at least 40 GB free before proceeding.
 
 ### Step 5 — Dedup across ALL rounds
 
-Clear any root-owned temp dir first, then run dedup for articles and article_details separately.
+Clear any root-owned temp dir first, then run the dedup command which now covers all 7 entity types.
 
 ```bash
 sudo rm -rf /tmp/duckdb_dedup
 cd /opt/scrap_auto
 source venv/bin/activate
+
+scrap-auto dedup
 ```
 
-**Articles dedup** (fast, uses DuckDB directly):
+This handles in order: `manufacturers`, `models`, `car_types`, `car_type_details`, `category_groups`, `articles`, `article_details`. All produce `data/parquet/<entity>_deduped.parquet`.
 
-```bash
-python3 - <<'PYEOF'
-import duckdb
-
-con = duckdb.connect()
-con.execute("SET memory_limit='4GB'")
-con.execute("SET temp_directory='/tmp/duckdb_dedup'")
-con.execute("SET preserve_insertion_order=false")
-con.execute("SET threads=2")
-con.execute("""
-    COPY (
-        SELECT DISTINCT ON (article_id) *
-        FROM read_parquet('data/parquet/entity_type=articles/**/*.parquet', hive_partitioning=false)
-        ORDER BY article_id
-    )
-    TO 'data/parquet/articles_deduped.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
-""")
-con.close()
-print("Done → articles_deduped.parquet")
-PYEOF
-```
-
-**Article_details dedup** (streaming, handles large datasets):
+**If `article_details` dedup fails with OOM**, the first 6 entities are already done. Run the streaming fallback for article_details only:
 
 ```bash
 python3 - <<'PYEOF'
@@ -203,7 +183,12 @@ for i, f in enumerate(files):
     con.execute("SET temp_directory='/tmp/duckdb_dedup'")
     con.execute("SET preserve_insertion_order=false")
     con.execute("SET threads=1")
-    ids_in_file = {row[0] for row in con.execute(f"SELECT article_id FROM read_parquet('{f}', hive_partitioning=false)").fetchall() if row[0] is not None}
+    try:
+        ids_in_file = {row[0] for row in con.execute(f"SELECT article_id FROM read_parquet('{f}', hive_partitioning=false)").fetchall() if row[0] is not None}
+    except Exception as e:
+        print(f"[{i+1}/{len(files)}] SKIP (bad file: {e}) — {f}")
+        con.close()
+        continue
     new_ids = ids_in_file - seen_ids
     if not new_ids:
         print(f"[{i+1}/{len(files)}] skip ({len(ids_in_file)} all seen)")
@@ -263,15 +248,133 @@ This is idempotent — safe to re-run after every round.
 
 ```bash
 psql 'postgresql://autoparts_api:ScrapAuto2026!Kinane@localhost/autoparts' <<'SQL'
-SELECT 'articles'        AS t, COUNT(*) FROM autoparts_articles
+SELECT 'manufacturers'    AS t, COUNT(*) FROM autoparts_manufacturers
 UNION ALL
-SELECT 'article_details' AS t, COUNT(*) FROM autoparts_article_details
+SELECT 'model_series'     AS t, COUNT(*) FROM autoparts_model_series
 UNION ALL
-SELECT 'compatible_cars' AS t, COUNT(*) FROM autoparts_compatible_cars;
+SELECT 'car_types'        AS t, COUNT(*) FROM autoparts_car_types
+UNION ALL
+SELECT 'car_type_details' AS t, COUNT(*) FROM autoparts_car_type_details
+UNION ALL
+SELECT 'groups'           AS t, COUNT(*) FROM autoparts_groups
+UNION ALL
+SELECT 'articles'         AS t, COUNT(*) FROM autoparts_articles
+UNION ALL
+SELECT 'article_details'  AS t, COUNT(*) FROM autoparts_article_details
+UNION ALL
+SELECT 'compatible_cars'  AS t, COUNT(*) FROM autoparts_compatible_cars;
 SQL
 ```
 
-Expected growth after each round: articles and article_details counts increase.
+Expected growth after each round: articles, article_details, and compatible_cars counts increase.
+Dimension tables (manufacturers, model_series, car_types) grow only when new manufacturers or models
+are crawled; growth slows significantly after round 1.
+
+---
+
+### Step 7b — Dimension integrity check (run after every load)
+
+The crawler's `min_year_to_include=2006` filter means the navigation only exposes post-2006 cars.
+Compatible cars data contains all historical vehicles, so `autoparts_compatible_cars` always has
+more distinct car_type_ids than `autoparts_car_types`, and some manufacturer names in compatible_cars
+will not match any row in `autoparts_manufacturers`.
+
+Run these checks and fixes after every `scrap-auto load`:
+
+**1. Check coverage gaps:**
+
+```bash
+psql 'postgresql://autoparts_api:ScrapAuto2026!Kinane@localhost/autoparts' <<'SQL'
+-- Car types in compat but not in dimension table
+SELECT COUNT(DISTINCT c.car_type_id) AS compat_car_types,
+       COUNT(DISTINCT ct.car_type_id) AS dimension_car_types
+FROM autoparts_compatible_cars c
+LEFT JOIN autoparts_car_types ct ON ct.car_type_id = c.car_type_id;
+
+-- Model series with no linked manufacturer
+SELECT COUNT(*) AS model_series_null_manufacturer
+FROM autoparts_model_series WHERE manufacturer_id IS NULL;
+
+-- Top missing manufacturer names
+SELECT manufacturer_name, COUNT(DISTINCT article_id) AS articles
+FROM autoparts_compatible_cars
+WHERE manufacturer_name NOT IN (SELECT manufacturer_name FROM autoparts_manufacturers)
+GROUP BY manufacturer_name ORDER BY articles DESC LIMIT 10;
+SQL
+```
+
+**2. Insert missing manufacturers** (those absent from crawl navigation):
+
+```bash
+psql 'postgresql://autoparts_loader:ScrapAuto2026!Kinane@localhost/autoparts' <<'SQL'
+WITH max_id AS (
+    SELECT COALESCE(MAX(manufacturer_id), 0) AS m FROM autoparts_manufacturers
+),
+missing AS (
+    SELECT DISTINCT manufacturer_name,
+           (SELECT m FROM max_id) + ROW_NUMBER() OVER (ORDER BY manufacturer_name) AS new_id
+    FROM autoparts_compatible_cars
+    WHERE manufacturer_name IS NOT NULL
+      AND manufacturer_name NOT IN (SELECT manufacturer_name FROM autoparts_manufacturers)
+)
+INSERT INTO autoparts_manufacturers (manufacturer_id, manufacturer_name)
+SELECT new_id::INTEGER, manufacturer_name FROM missing
+ON CONFLICT (manufacturer_id) DO NOTHING;
+SQL
+```
+
+**3. Backfill missing model_series** (from compatible_cars, NULL specs for pre-2006 models):
+
+```bash
+psql 'postgresql://autoparts_loader:ScrapAuto2026!Kinane@localhost/autoparts' <<'SQL'
+INSERT INTO autoparts_model_series (model_series_id, manufacturer_id, display_name)
+SELECT DISTINCT ON (c.model_series_id)
+    c.model_series_id, m.manufacturer_id, c.model_name
+FROM autoparts_compatible_cars c
+LEFT JOIN autoparts_manufacturers m ON m.manufacturer_name = c.manufacturer_name
+WHERE c.model_series_id IS NOT NULL
+  AND c.model_series_id NOT IN (SELECT model_series_id FROM autoparts_model_series)
+ORDER BY c.model_series_id
+ON CONFLICT (model_series_id) DO NOTHING;
+SQL
+```
+
+**4. Backfill missing car_types** (NULL specs for pre-2006 types):
+
+```bash
+psql 'postgresql://autoparts_loader:ScrapAuto2026!Kinane@localhost/autoparts' <<'SQL'
+INSERT INTO autoparts_car_types (car_type_id, model_series_id)
+SELECT DISTINCT ON (car_type_id) car_type_id, model_series_id
+FROM autoparts_compatible_cars
+WHERE car_type_id IS NOT NULL
+  AND car_type_id NOT IN (SELECT car_type_id FROM autoparts_car_types)
+ORDER BY car_type_id
+ON CONFLICT (car_type_id) DO NOTHING;
+SQL
+```
+
+**5. Fix NULL manufacturer_id in model_series** (after manufacturers were added in step 2):
+
+```bash
+psql 'postgresql://autoparts_loader:ScrapAuto2026!Kinane@localhost/autoparts' <<'SQL'
+UPDATE autoparts_model_series ms
+SET manufacturer_id = sub.manufacturer_id
+FROM (
+    SELECT DISTINCT ON (c.model_series_id)
+        c.model_series_id, m.manufacturer_id
+    FROM autoparts_compatible_cars c
+    JOIN autoparts_manufacturers m ON m.manufacturer_name = c.manufacturer_name
+    WHERE c.model_series_id IS NOT NULL
+    ORDER BY c.model_series_id
+) sub
+WHERE ms.model_series_id = sub.model_series_id
+  AND ms.manufacturer_id IS NULL;
+SQL
+```
+
+After steps 2–5, re-run the check in step 1. `model_series_null_manufacturer` should be 0.
+`compat_car_types` will always exceed `dimension_car_types` by a small margin — this is expected
+for vehicles that appear only in compatibility data and have no spec entry in the source catalog.
 
 ---
 
@@ -280,6 +383,29 @@ Expected growth after each round: articles and article_details counts increase.
 Go back to Step 0. Increment the round label (e.g. `r5`, `r6`).
 
 **Crawl is complete when:** `skipped_seen` is 90%+ of all URLs and new `articles` count is < 500.
+
+---
+
+## Dimension Table Architecture
+
+Five lookup tables were added to enable fast hierarchical navigation (manufacturer → model → car type → category → article) without repeated full-table scans on `autoparts_compatible_cars`.
+
+| Table | PK | Source | Notes |
+|---|---|---|---|
+| `autoparts_manufacturers` | `manufacturer_id` | `manufacturers_deduped.parquet` + Step 7b backfill | 121 crawled + N extras from compat_cars |
+| `autoparts_model_series` | `model_series_id` | `models_deduped.parquet` + Step 7b backfill | links to manufacturer_id |
+| `autoparts_car_types` | `car_type_id` | `car_types_deduped.parquet` + Step 7b backfill | links to model_series_id |
+| `autoparts_car_type_details` | `car_type_id` | `car_type_details_deduped.parquet` | engine, displacement, power specs |
+| `autoparts_groups` | `group_id` | `category_groups_deduped.parquet` | 3-level category tree |
+
+**Coverage gap (expected):** The crawler filters by `min_year_to_include=2006`, so dimension tables
+from crawl navigation only cover post-2006 vehicles. `autoparts_compatible_cars` contains all
+historical vehicles (pre-2006 included). Step 7b backfills the gaps with NULL specs so every
+car_type_id in compatible_cars has a dimension row, making navigation queries work for all vehicles.
+
+**Manufacturer name mismatches:** Compatible cars data uses short names (`VW`, `ALFA ROMEO`) while
+crawl navigation uses full names (`VOLKSWAGEN`). Step 7b inserts all unmatched manufacturer names
+as new rows with generated IDs so model_series can always link to a manufacturer.
 
 ---
 
@@ -470,3 +596,8 @@ are loaded, `skipped_fk` should be 0.
 | `autoparts_compatible_cars` has duplicate rows (n=2 or 3 per group) | Same article_id appears multiple times in a chunk file; streaming dedup kept all copies; loader inserted duplicates. Fix: use `DISTINCT ON (article_id)` in dedup COPY; loader now deduplicates within each batch. Clean DB with: `DELETE FROM autoparts_compatible_cars WHERE id NOT IN (SELECT MIN(id) FROM autoparts_compatible_cars GROUP BY article_id, car_type_id, model_series_id, manufacturer_name, model_name, engine_or_variant, year_from, year_to, extra_qualifier)` |
 | `ParserException: syntax error at or near "BIGINT"` in `read_json` | DuckDB `columns=` dict must be a Python string like `{'col': 'TYPE'}`, not formatted as SQL DDL. Build with: `col_sql = '{' + ', '.join(f"'{k}': '{v}'" for k, v in columns.items()) + '}'` |
 | article_details load says `skipped_fk=N` even after recovery | articles.jsonl for that round was converted with all-VARCHAR (article_id stored as string) — re-convert with explicit `'article_id': 'BIGINT'` and re-dedup |
+| `IO Error: No files found` for dimension entities in `scrap-auto dedup` | The dimension JSONL files (manufacturers.jsonl, models.jsonl, etc.) were deleted before `scrap-auto convert` was run, so no parquet directories exist. Recover the JSONL from the Storage Box round folder and re-run convert, then delete the recovered JSONL before the next crawl to avoid contaminating the article_details convert. |
+| Step 3 of navigation (car types) returns 0 rows | `autoparts_car_types` only contains types navigated during crawl (filtered by `min_year_to_include`). Run Step 7b backfill to populate all car_type_ids from `autoparts_compatible_cars`. |
+| `autoparts_model_series` has `manufacturer_id IS NULL` for some rows | Manufacturer name in `autoparts_compatible_cars` has no match in `autoparts_manufacturers` (e.g. VW vs VOLKSWAGEN, or manufacturer not in allowlist). Run Step 7b steps 2 and 5 to insert missing manufacturers and repair the links. |
+| `InvalidInputException: File too small to be a Parquet file` in streaming dedup | A chunk parquet is zero-byte or corrupted (convert was interrupted mid-chunk). The streaming script now wraps each file read in try/except and prints `SKIP (bad file)` — the file is skipped automatically. To identify bad files: `find data/parquet/entity_type=article_details -name '*.parquet' -size -1k` |
+| `scrap-auto convert` includes article_details and OOMs mid-run | Convert processes all entities found in data/. If a large article_details.jsonl is present alongside recovered dimension files, it will attempt both. Either convert dimensions separately (rename article_details.jsonl temporarily) or delete dimension JSONL immediately after convert completes. |
