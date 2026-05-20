@@ -357,14 +357,23 @@ def dedup(
     con.execute("SET preserve_insertion_order=false")
     con.execute("SET threads=2")
 
-    for entity in ("articles", "article_details"):
+    entity_pk = [
+        ("manufacturers",    "manufacturer_id"),
+        ("models",           "model_series_id"),
+        ("car_types",        "car_type_id"),
+        ("car_type_details", "car_type_id"),
+        ("category_groups",  "group_id"),
+        ("articles",         "article_id"),
+        ("article_details",  "article_id"),
+    ]
+    for entity, pk in entity_pk:
         glob = f"{data_dir}/entity_type={entity}/**/*.parquet"
         out = f"{data_dir}/{entity}_deduped.parquet"
         console.print(f"[cyan]Deduplicating[/cyan] {entity}")
         try:
             con.execute(
-                f"COPY (SELECT DISTINCT ON (article_id) * FROM read_parquet('{glob}')"
-                f" ORDER BY article_id)"
+                f"COPY (SELECT DISTINCT ON ({pk}) * FROM read_parquet('{glob}', hive_partitioning=false)"
+                f" ORDER BY {pk})"
                 f" TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
             )
             console.print(f"[green]Done[/green] → {out}")

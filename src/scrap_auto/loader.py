@@ -56,16 +56,77 @@ CREATE TABLE IF NOT EXISTS autoparts_compatible_cars (
     extra_qualifier   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS autoparts_manufacturers (
+    manufacturer_id   INTEGER PRIMARY KEY,
+    manufacturer_name TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autoparts_model_series (
+    model_series_id   INTEGER PRIMARY KEY,
+    manufacturer_id   INTEGER,
+    display_name      TEXT,
+    model_native_name TEXT,
+    year_from         TEXT,
+    year_to           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS autoparts_car_types (
+    car_type_id     INTEGER PRIMARY KEY,
+    model_series_id INTEGER,
+    manufacturer_id INTEGER,
+    type_label      TEXT,
+    engine_code     TEXT,
+    cylinder        INTEGER,
+    capacity        TEXT,
+    fuel_type       TEXT,
+    power           TEXT,
+    year_from       INTEGER,
+    year_to         INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS autoparts_car_type_details (
+    car_type_id           INTEGER PRIMARY KEY,
+    car_type_title        TEXT,
+    construction_interval TEXT,
+    year_from             INTEGER,
+    year_to               INTEGER,
+    details               JSONB
+);
+
+CREATE TABLE IF NOT EXISTS autoparts_groups (
+    group_id             INTEGER PRIMARY KEY,
+    group_name           TEXT,
+    primary_group_name   TEXT,
+    subcategory_name     TEXT,
+    sub_subcategory_name TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_articles_fts
     ON autoparts_articles USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS idx_articles_partnum
     ON autoparts_articles USING GIN (part_number gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_articles_mfr
     ON autoparts_articles (article_manufacturer);
+CREATE INDEX IF NOT EXISTS idx_articles_group
+    ON autoparts_articles (group_id);
+CREATE INDEX IF NOT EXISTS idx_articles_car_type_id
+    ON autoparts_articles (car_type_id);
 CREATE INDEX IF NOT EXISTS idx_compat_lookup
     ON autoparts_compatible_cars (manufacturer_name, model_name);
 CREATE INDEX IF NOT EXISTS idx_compat_article
     ON autoparts_compatible_cars (article_id);
+CREATE INDEX IF NOT EXISTS idx_compat_car_type
+    ON autoparts_compatible_cars (car_type_id);
+CREATE INDEX IF NOT EXISTS idx_manufacturers_name
+    ON autoparts_manufacturers USING GIN (manufacturer_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_model_series_mfr
+    ON autoparts_model_series (manufacturer_id);
+CREATE INDEX IF NOT EXISTS idx_model_series_name
+    ON autoparts_model_series USING GIN (display_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_car_types_model
+    ON autoparts_car_types (model_series_id);
+CREATE INDEX IF NOT EXISTS idx_car_types_mfr
+    ON autoparts_car_types (manufacturer_id);
 """
 
 _GRANT_API_SQL = """\
@@ -117,6 +178,66 @@ INSERT INTO autoparts_compatible_cars
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
 """
 
+_UPSERT_MANUFACTURER = """\
+INSERT INTO autoparts_manufacturers (manufacturer_id, manufacturer_name)
+VALUES (%s,%s)
+ON CONFLICT (manufacturer_id) DO UPDATE SET
+    manufacturer_name = EXCLUDED.manufacturer_name
+"""
+
+_UPSERT_MODEL_SERIES = """\
+INSERT INTO autoparts_model_series
+    (model_series_id, manufacturer_id, display_name, model_native_name, year_from, year_to)
+VALUES (%s,%s,%s,%s,%s,%s)
+ON CONFLICT (model_series_id) DO UPDATE SET
+    manufacturer_id   = EXCLUDED.manufacturer_id,
+    display_name      = EXCLUDED.display_name,
+    model_native_name = EXCLUDED.model_native_name,
+    year_from         = EXCLUDED.year_from,
+    year_to           = EXCLUDED.year_to
+"""
+
+_UPSERT_CAR_TYPE = """\
+INSERT INTO autoparts_car_types
+    (car_type_id, model_series_id, manufacturer_id, type_label, engine_code,
+     cylinder, capacity, fuel_type, power, year_from, year_to)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+ON CONFLICT (car_type_id) DO UPDATE SET
+    model_series_id = EXCLUDED.model_series_id,
+    manufacturer_id = EXCLUDED.manufacturer_id,
+    type_label      = EXCLUDED.type_label,
+    engine_code     = EXCLUDED.engine_code,
+    cylinder        = EXCLUDED.cylinder,
+    capacity        = EXCLUDED.capacity,
+    fuel_type       = EXCLUDED.fuel_type,
+    power           = EXCLUDED.power,
+    year_from       = EXCLUDED.year_from,
+    year_to         = EXCLUDED.year_to
+"""
+
+_UPSERT_CAR_TYPE_DETAIL = """\
+INSERT INTO autoparts_car_type_details
+    (car_type_id, car_type_title, construction_interval, year_from, year_to, details)
+VALUES (%s,%s,%s,%s,%s,%s::jsonb)
+ON CONFLICT (car_type_id) DO UPDATE SET
+    car_type_title        = EXCLUDED.car_type_title,
+    construction_interval = EXCLUDED.construction_interval,
+    year_from             = EXCLUDED.year_from,
+    year_to               = EXCLUDED.year_to,
+    details               = EXCLUDED.details
+"""
+
+_UPSERT_GROUP = """\
+INSERT INTO autoparts_groups
+    (group_id, group_name, primary_group_name, subcategory_name, sub_subcategory_name)
+VALUES (%s,%s,%s,%s,%s)
+ON CONFLICT (group_id) DO UPDATE SET
+    group_name           = EXCLUDED.group_name,
+    primary_group_name   = EXCLUDED.primary_group_name,
+    subcategory_name     = EXCLUDED.subcategory_name,
+    sub_subcategory_name = EXCLUDED.sub_subcategory_name
+"""
+
 
 def load_all(
     database_url: str,
@@ -140,8 +261,24 @@ def load_all(
             conn.execute(_GRANT_API_SQL)
             conn.commit()
 
-        articles_path = data_dir / "parquet" / "articles_deduped.parquet"
-        details_path = data_dir / "parquet" / "article_details_deduped.parquet"
+        parquet_dir = data_dir / "parquet"
+
+        dimension_loaders = [
+            ("manufacturers_deduped.parquet",   _load_manufacturers),
+            ("models_deduped.parquet",           _load_model_series),
+            ("car_types_deduped.parquet",        _load_car_types),
+            ("car_type_details_deduped.parquet", _load_car_type_details),
+            ("category_groups_deduped.parquet",  _load_groups),
+        ]
+        for filename, loader_fn in dimension_loaders:
+            path = parquet_dir / filename
+            if path.exists():
+                loader_fn(conn, path, batch_size, console)
+            else:
+                console.print(f"[yellow]Not found: {path} — run 'scrap-auto dedup' first[/yellow]")
+
+        articles_path = parquet_dir / "articles_deduped.parquet"
+        details_path  = parquet_dir / "article_details_deduped.parquet"
 
         if articles_path.exists():
             _load_articles(conn, articles_path, batch_size, console)
@@ -192,6 +329,138 @@ def _load_articles(conn: Any, path: Path, batch_size: int, console: Any) -> None
         console.print(f"  articles {loaded}/{total}")
 
     console.print(f"[green]Articles loaded: {loaded}[/green]")
+
+
+def _load_manufacturers(conn: Any, path: Path, batch_size: int, console: Any) -> None:
+    import polars as pl
+
+    console.print("[cyan]Loading manufacturers → autoparts_manufacturers[/cyan]")
+    df = pl.read_parquet(path)
+    total = len(df)
+    loaded = 0
+    for start in range(0, total, batch_size):
+        rows = [
+            (_int(r.get("manufacturer_id")), r.get("name") or "")
+            for r in df.slice(start, batch_size).to_dicts()
+            if _int(r.get("manufacturer_id")) is not None
+        ]
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_MANUFACTURER, rows)
+        conn.commit()
+        loaded += len(rows)
+    console.print(f"[green]Manufacturers loaded: {loaded}[/green]")
+
+
+def _load_model_series(conn: Any, path: Path, batch_size: int, console: Any) -> None:
+    import polars as pl
+
+    console.print("[cyan]Loading model series → autoparts_model_series[/cyan]")
+    df = pl.read_parquet(path)
+    total = len(df)
+    loaded = 0
+    for start in range(0, total, batch_size):
+        rows = []
+        for r in df.slice(start, batch_size).to_dicts():
+            if _int(r.get("model_series_id")) is None:
+                continue
+            rows.append((
+                _int(r.get("model_series_id")),
+                _int(r.get("manufacturer_id")),
+                r.get("display_name") or "",
+                r.get("model_native_name") or "",
+                _str(r.get("from_date")),
+                _str(r.get("to_date")),
+            ))
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_MODEL_SERIES, rows)
+        conn.commit()
+        loaded += len(rows)
+    console.print(f"[green]Model series loaded: {loaded}[/green]")
+
+
+def _load_car_types(conn: Any, path: Path, batch_size: int, console: Any) -> None:
+    import polars as pl
+
+    console.print("[cyan]Loading car types → autoparts_car_types[/cyan]")
+    df = pl.read_parquet(path)
+    total = len(df)
+    loaded = 0
+    for start in range(0, total, batch_size):
+        rows = []
+        for r in df.slice(start, batch_size).to_dicts():
+            if _int(r.get("car_type_id")) is None:
+                continue
+            rows.append((
+                _int(r.get("car_type_id")),
+                _int(r.get("model_series_id")),
+                _int(r.get("manufacturer_id")),
+                r.get("type_label") or "",
+                r.get("engine_code") or "",
+                _int(r.get("cylinder")),
+                r.get("capacity") or "",
+                r.get("fuel_type") or "",
+                r.get("power") or "",
+                _int(r.get("year_from")),
+                _int(r.get("year_to")),
+            ))
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_CAR_TYPE, rows)
+        conn.commit()
+        loaded += len(rows)
+    console.print(f"[green]Car types loaded: {loaded}[/green]")
+
+
+def _load_car_type_details(conn: Any, path: Path, batch_size: int, console: Any) -> None:
+    import polars as pl
+
+    console.print("[cyan]Loading car type details → autoparts_car_type_details[/cyan]")
+    df = pl.read_parquet(path)
+    total = len(df)
+    loaded = 0
+    for start in range(0, total, batch_size):
+        rows = []
+        for r in df.slice(start, batch_size).to_dicts():
+            if _int(r.get("car_type_id")) is None:
+                continue
+            rows.append((
+                _int(r.get("car_type_id")),
+                r.get("car_type_title") or "",
+                r.get("construction_interval") or "",
+                _int(r.get("year_from")),
+                _int(r.get("year_to")),
+                json.dumps(_list(r.get("details"))),
+            ))
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_CAR_TYPE_DETAIL, rows)
+        conn.commit()
+        loaded += len(rows)
+    console.print(f"[green]Car type details loaded: {loaded}[/green]")
+
+
+def _load_groups(conn: Any, path: Path, batch_size: int, console: Any) -> None:
+    import polars as pl
+
+    console.print("[cyan]Loading groups → autoparts_groups[/cyan]")
+    df = pl.read_parquet(path)
+    total = len(df)
+    loaded = 0
+    for start in range(0, total, batch_size):
+        rows = []
+        for r in df.slice(start, batch_size).to_dicts():
+            if _int(r.get("group_id")) is None:
+                continue
+            rows.append((
+                _int(r.get("group_id")),
+                r.get("group_name") or "",
+                r.get("primary_group_name") or "",
+                r.get("subcategory_name") or "",
+                r.get("sub_subcategory_name") or "",
+            ))
+        with conn.cursor() as cur:
+            cur.executemany(_UPSERT_GROUP, rows)
+        conn.commit()
+        loaded += len(rows)
+    console.print(f"[green]Groups loaded: {loaded}[/green]")
 
 
 def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) -> None:
