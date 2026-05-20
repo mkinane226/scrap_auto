@@ -215,6 +215,9 @@ class Crawler:
                 counters["records_written"] += 1
                 self._maybe_log_progress(counters)
 
+            if self.limits.max_groups_per_car_type == 0:
+                continue
+
             category_url = str(car_type["category_url"])
             ids_c = parse_category_page_url(category_url)
             if not ids_c:
