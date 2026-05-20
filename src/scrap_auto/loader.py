@@ -213,6 +213,7 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
         detail_rows = []
         compat_rows: list[tuple] = []
         batch_article_ids: list[int] = []
+        seen_in_batch: set[int] = set()
 
         for r in batch.to_pylist():
             article_id = _int(r.get("article_id"))
@@ -221,6 +222,9 @@ def _load_article_details(conn: Any, path: Path, batch_size: int, console: Any) 
             if article_id not in valid_article_ids:
                 skipped_fk += 1
                 continue
+            if article_id in seen_in_batch:
+                continue
+            seen_in_batch.add(article_id)
 
             batch_article_ids.append(article_id)
             detail_rows.append((

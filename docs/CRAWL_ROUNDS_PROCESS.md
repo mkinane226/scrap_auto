@@ -212,7 +212,7 @@ for i, f in enumerate(files):
     seen_ids |= new_ids
     ids_str = ','.join(str(x) for x in new_ids)
     tmp_out = tmp_dir / f'part_{i:04d}.parquet'
-    con.execute(f"COPY (SELECT * FROM read_parquet('{f}', hive_partitioning=false) WHERE article_id IN ({ids_str})) TO '{tmp_out}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+    con.execute(f"COPY (SELECT DISTINCT ON (article_id) * FROM read_parquet('{f}', hive_partitioning=false) WHERE article_id IN ({ids_str}) ORDER BY article_id) TO '{tmp_out}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     con.close()
     tmp_files.append(str(tmp_out))
     print(f"[{i+1}/{len(files)}] +{len(new_ids)} new → {tmp_out.name}")
@@ -312,19 +312,27 @@ SSH access (root): `ssh -p 23 -i /root/.ssh/storagebox u590268@u590268.your-stor
 ## Recovery: articles.jsonl missing from a round
 
 If you get `ForeignKeyViolation: article_id not present in autoparts_articles`, a previous round's
-`articles.jsonl` was deleted before being converted. Recover it from the Storage Box:
+`articles.jsonl` was deleted before being converted. Recover it from the Storage Box.
+
+**Critical:** `article_id` **must** be typed as `BIGINT`, not VARCHAR. Using auto_detect or all-VARCHAR
+produces article_ids stored as strings, which silently breaks FK joins — article_details rows will
+appear to have no matching parent even though they do.
+
+### Single-round recovery
 
 **As root:**
 ```bash
 ssh -p 23 -i /root/.ssh/storagebox \
     u590268@u590268.your-storagebox.de \
     "cat scrap_auto/jsonl_roundN/articles.jsonl" \
-    > /opt/scrap_auto/data/roundN_articles.jsonl
+    > /opt/scrap_auto/data/articles_roundN.jsonl
 
-chown odoo:odoo /opt/scrap_auto/data/roundN_articles.jsonl
+chown odoo:odoo /opt/scrap_auto/data/articles_roundN.jsonl
 ```
 
-**As odoo** — convert using explicit column list (auto_detect produces a broken `json` column):
+**As odoo** — convert with explicit types (`auto_detect` produces a single broken `json` column;
+`columns=` dict must be built as a Python string, not formatted as SQL DDL):
+
 ```bash
 cd /opt/scrap_auto
 source venv/bin/activate
@@ -333,24 +341,111 @@ python3 - <<'PYEOF'
 import duckdb
 from pathlib import Path
 
-src = 'data/roundN_articles.jsonl'
+columns = {
+    'article_id':           'BIGINT',
+    'part_name':            'VARCHAR',
+    'part_number':          'VARCHAR',
+    'article_manufacturer': 'VARCHAR',
+    'supplier_id':          'INTEGER',
+    'product_id':           'INTEGER',
+    'thumbnail_url':        'VARCHAR',
+    'details_url':          'VARCHAR',
+    'model_series_id':      'BIGINT',
+    'manufacturer_id':      'BIGINT',
+    'group_id':             'BIGINT',
+    'car_type_id':          'BIGINT',
+    'lang_id':              'INTEGER',
+    'country_id':           'INTEGER',
+    'type_id':              'INTEGER',
+    'is_oem':               'BOOLEAN',
+}
+col_sql = '{' + ', '.join(f"'{k}': '{v}'" for k, v in columns.items()) + '}'
+
+src = 'data/articles_roundN.jsonl'
 dst = Path('data/parquet/entity_type=articles/crawl_date=2026-05-18-rN/part-0.parquet')
 dst.parent.mkdir(parents=True, exist_ok=True)
 
-cols = ['part_name', 'article_id', 'part_number', 'article_manufacturer', 'supplier_id',
-        'product_id', 'thumbnail_url', 'details_url', 'model_series_id', 'manufacturer_id',
-        'group_id', 'car_type_id', 'lang_id', 'country_id', 'type_id', 'is_oem']
-col_defs = ', '.join(f"'{c}': 'VARCHAR'" for c in cols)
-
 con = duckdb.connect()
 con.execute("SET memory_limit='3GB'")
-con.execute(f"COPY (SELECT * FROM read_json('{src}', columns={{{col_defs}}})) TO '{dst}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+con.execute(f"COPY (SELECT * FROM read_json('{src}', columns={col_sql})) TO '{dst}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 con.close()
 print(f"Done → {dst}")
 PYEOF
 ```
 
+### Multi-round recovery (all missing rounds at once)
+
+If multiple rounds need recovery, download all files first (as root), then convert all at once (as odoo):
+
+**As root — download all:**
+```bash
+for rnd in 1 2 3; do
+    ssh -p 23 -i /root/.ssh/storagebox \
+        u590268@u590268.your-storagebox.de \
+        "cat scrap_auto/jsonl_round${rnd}/articles.jsonl" \
+        > /opt/scrap_auto/data/articles_round${rnd}.jsonl
+    chown odoo:odoo /opt/scrap_auto/data/articles_round${rnd}.jsonl
+    echo "Round ${rnd} done"
+done
+```
+
+**As odoo — convert all:**
+```bash
+cd /opt/scrap_auto
+source venv/bin/activate
+
+python3 - <<'PYEOF'
+import duckdb
+from pathlib import Path
+
+columns = {
+    'article_id':           'BIGINT',
+    'part_name':            'VARCHAR',
+    'part_number':          'VARCHAR',
+    'article_manufacturer': 'VARCHAR',
+    'supplier_id':          'INTEGER',
+    'product_id':           'INTEGER',
+    'thumbnail_url':        'VARCHAR',
+    'details_url':          'VARCHAR',
+    'model_series_id':      'BIGINT',
+    'manufacturer_id':      'BIGINT',
+    'group_id':             'BIGINT',
+    'car_type_id':          'BIGINT',
+    'lang_id':              'INTEGER',
+    'country_id':           'INTEGER',
+    'type_id':              'INTEGER',
+    'is_oem':               'BOOLEAN',
+}
+col_sql = '{' + ', '.join(f"'{k}': '{v}'" for k, v in columns.items()) + '}'
+
+for rnd in [1, 2, 3]:
+    src = f'data/articles_round{rnd}.jsonl'
+    if not Path(src).exists():
+        print(f"Round {rnd}: {src} not found — skipping")
+        continue
+    dst = Path(f'data/parquet/entity_type=articles/crawl_date=2026-05-18-r{rnd}/part-0.parquet')
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute("SET memory_limit='3GB'")
+    con.execute(f"COPY (SELECT * FROM read_json('{src}', columns={col_sql})) TO '{dst}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+    con.close()
+    print(f"Round {rnd} → {dst}")
+PYEOF
+```
+
 Then re-run Step 5 (dedup) and Step 6 (load).
+
+---
+
+## Loader safety net: `valid_article_ids`
+
+The loader pre-fetches all known `article_id` values from `autoparts_articles` before inserting
+`article_details`. Any detail row whose `article_id` is not in that set is silently skipped
+(logged as `Skipped N details with no parent article (FK)`).
+
+This means **re-running `scrap-auto load` after recovering missing articles** will pick up the
+previously-skipped details automatically — no manual cleanup needed. Once all rounds' articles
+are loaded, `skipped_fk` should be 0.
 
 ---
 
@@ -372,3 +467,6 @@ Then re-run Step 5 (dedup) and Step 6 (load).
 | `ForeignKeyViolation: article_id not present in autoparts_articles` | A round's articles.jsonl was never converted — recover from Storage Box (see Recovery section) |
 | `IO Error: No files found` for `/root/` path | `/root/` is not readable by odoo — copy file: `cp /root/file /opt/scrap_auto/data/ && chown odoo:odoo /opt/scrap_auto/data/file` |
 | Schema mismatch on parquet merge (`crawl_date` type) | Mixed date/string types across rounds — use the `normalize()` function in the dedup script |
+| `autoparts_compatible_cars` has duplicate rows (n=2 or 3 per group) | Same article_id appears multiple times in a chunk file; streaming dedup kept all copies; loader inserted duplicates. Fix: use `DISTINCT ON (article_id)` in dedup COPY; loader now deduplicates within each batch. Clean DB with: `DELETE FROM autoparts_compatible_cars WHERE id NOT IN (SELECT MIN(id) FROM autoparts_compatible_cars GROUP BY article_id, car_type_id, model_series_id, manufacturer_name, model_name, engine_or_variant, year_from, year_to, extra_qualifier)` |
+| `ParserException: syntax error at or near "BIGINT"` in `read_json` | DuckDB `columns=` dict must be a Python string like `{'col': 'TYPE'}`, not formatted as SQL DDL. Build with: `col_sql = '{' + ', '.join(f"'{k}': '{v}'" for k, v in columns.items()) + '}'` |
+| article_details load says `skipped_fk=N` even after recovery | articles.jsonl for that round was converted with all-VARCHAR (article_id stored as string) — re-convert with explicit `'article_id': 'BIGINT'` and re-dedup |
