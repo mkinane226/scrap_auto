@@ -29,9 +29,16 @@ api = [
   "uvicorn[standard]>=0.30",
   "asyncpg>=0.29"
 ]
+car-parts-api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "asyncpg>=0.29",
+  "pydantic-settings>=2.0"
+]
 
 [project.scripts]
 scrap-auto = "scrap_auto.cli:app"
+car-parts-api = "car_parts_api.main:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

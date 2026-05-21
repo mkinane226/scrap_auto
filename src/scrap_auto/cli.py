@@ -338,6 +338,63 @@ def load(
     load_all(database_url, data_dir, batch_size, init, grant_api, console)
 
 
+def _dedup_streaming(glob_pattern: str, pk: str, out_path: str, console: Any) -> None:
+    """PyArrow streaming dedup — reads one parquet file at a time, O(n_unique_ids) memory.
+
+    Files are sorted newest-first so the most recent crawl round wins when
+    the same pk appears in multiple rounds.
+    """
+    import glob as _glob
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    files = sorted(_glob.glob(glob_pattern, recursive=True), reverse=True)
+    if not files:
+        console.print(f"[yellow]  No parquet files found: {glob_pattern}[/yellow]")
+        return
+
+    seen: set[Any] = set()
+    writer: pq.ParquetWriter | None = None
+    skipped = 0
+    total = 0
+
+    for fpath in files:
+        try:
+            pf = pq.ParquetFile(fpath)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]  SKIP (bad file): {fpath} — {exc}[/yellow]")
+            skipped += 1
+            continue
+
+        # Read in batches so large files (multi-GB parquet) never load fully into RAM.
+        for batch in pf.iter_batches(batch_size=500):
+            table = pa.Table.from_batches([batch])
+            if table.num_rows == 0:
+                continue
+            pk_vals = table.column(pk).to_pylist()
+            mask = []
+            for v in pk_vals:
+                if v not in seen:
+                    seen.add(v)
+                    mask.append(True)
+                else:
+                    mask.append(False)
+            filtered = table.filter(pa.array(mask))
+            if filtered.num_rows > 0:
+                if writer is None:
+                    writer = pq.ParquetWriter(out_path, filtered.schema, compression="zstd")
+                writer.write_table(filtered)
+                total += filtered.num_rows
+
+    if writer:
+        writer.close()
+
+    suffix = f", {skipped} bad files skipped" if skipped else ""
+    console.print(
+        f"[green]Done[/green] → {out_path} ({total} rows, {len(seen)} unique {pk}{suffix})"
+    )
+
+
 @app.command("dedup")
 def dedup(
     data_dir: str = typer.Option("data/parquet", help="Parquet data directory."),
@@ -367,18 +424,25 @@ def dedup(
         ("article_details",  "article_id"),
     ]
     for entity, pk in entity_pk:
-        glob = f"{data_dir}/entity_type={entity}/**/*.parquet"
+        glob_pat = f"{data_dir}/entity_type={entity}/**/*.parquet"
         out = f"{data_dir}/{entity}_deduped.parquet"
         console.print(f"[cyan]Deduplicating[/cyan] {entity}")
         try:
             con.execute(
-                f"COPY (SELECT DISTINCT ON ({pk}) * FROM read_parquet('{glob}', hive_partitioning=false)"
+                f"COPY (SELECT DISTINCT ON ({pk}) * FROM read_parquet('{glob_pat}', hive_partitioning=false)"
                 f" ORDER BY {pk})"
                 f" TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
             )
             console.print(f"[green]Done[/green] → {out}")
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[red]Failed {entity}[/red] :: {exc}")
+            if "Out of Memory" in str(exc):
+                console.print(f"[yellow]  OOM — retrying {entity} with streaming dedup...[/yellow]")
+                try:
+                    _dedup_streaming(glob_pat, pk, out, console)
+                except Exception as exc2:  # noqa: BLE001
+                    console.print(f"[red]Failed {entity} (streaming)[/red] :: {exc2}")
+            else:
+                console.print(f"[red]Failed {entity}[/red] :: {exc}")
 
     con.close()
     console.print("[bold green]Dedup complete[/bold green]")
