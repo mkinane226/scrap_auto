@@ -6,7 +6,9 @@
       "Bash(Select-Object -First 20)",
       "WebSearch",
       "PowerShell($ProgressPreference = 'SilentlyContinue'; $html = \\(Invoke-WebRequest -Uri 'https://auto-parts-catalog.makingdatameaningful.com/list-articles/108575/101779/manufacturer-id-36/lang-id-6/country-filter-id-145/type-id-1' -UseBasicParsing\\).Content; $html.Substring\\(0, 15000\\) | Select-String 'colman' -Context 5)",
-      "Bash(scrap-auto validate *)"
+      "Bash(scrap-auto validate *)",
+      "Bash(python3 -m py_compile /c/dev/scrap_auto/src/car_parts_api/*.py /c/dev/scrap_auto/src/car_parts_api/routers/*.py /c/dev/scrap_auto/src/car_parts_api/schemas/*.py)",
+      "Bash(python3)"
     ]
   }
 }
