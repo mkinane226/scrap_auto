@@ -44,6 +44,15 @@ class ArticleDetail(BaseModel):
     image_urls: list[str]
 
 
+class CarTypeGroup(BaseModel):
+    group_id: int
+    group_name: str
+    primary_group_name: str | None
+    subcategory_name: str | None
+    sub_subcategory_name: str | None
+    article_count: int
+
+
 class CompatibleCar(BaseModel):
     car_type_id: int | None
     model_series_id: int | None

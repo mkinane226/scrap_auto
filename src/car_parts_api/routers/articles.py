@@ -8,6 +8,7 @@ from ..schemas.articles import (
     ArticleDetail,
     ArticleResult,
     ArticleSearchResponse,
+    CarTypeGroup,
     CompatibleCar,
 )
 from ..schemas.common import Page
@@ -75,6 +76,27 @@ _DETAIL_SQL = """
     WHERE a.article_id = $1
 """
 
+_GROUPS_FOR_CAR_SQL = """
+    SELECT
+        g.group_id,
+        g.group_name,
+        g.primary_group_name,
+        g.subcategory_name,
+        g.sub_subcategory_name,
+        COUNT(DISTINCT a.article_id) AS article_count
+    FROM autoparts_groups g
+    JOIN autoparts_articles a ON a.group_id = g.group_id
+    WHERE EXISTS (
+        SELECT 1
+        FROM   autoparts_compatible_cars
+        WHERE  article_id = a.article_id
+        AND    car_type_id = $1
+    )
+    GROUP BY g.group_id, g.group_name, g.primary_group_name,
+             g.subcategory_name, g.sub_subcategory_name
+    ORDER BY g.primary_group_name, g.subcategory_name, g.group_name
+"""
+
 # COUNT(*) OVER() gives the unfiltered total alongside the page rows so compatible_cars
 # uses a single query and a single connection per request.
 _COMPAT_SQL = """
@@ -134,6 +156,20 @@ async def search_articles(
         limit=limit,
         results=[ArticleResult.model_validate(dict(r)) for r in rows],
     )
+
+
+@router.get(
+    "/articles/groups",
+    response_model=list[CarTypeGroup],
+    summary="Part categories that have articles compatible with a car type, with article counts",
+)
+async def groups_for_car(
+    car_type_id: int = Query(..., description="Car type ID (from /sync/car-types)"),
+    pool: asyncpg.Pool = Depends(db_pool),
+) -> list[CarTypeGroup]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_GROUPS_FOR_CAR_SQL, car_type_id)
+    return [CarTypeGroup.model_validate(dict(r)) for r in rows]
 
 
 @router.get(
