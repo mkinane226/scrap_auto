@@ -17,23 +17,28 @@ router = APIRouter(tags=["articles"], dependencies=[Depends(require_api_key)])
 # ---------------------------------------------------------------------------
 # SQL helpers
 # ---------------------------------------------------------------------------
-# $1 = car_type_id (int, required)
-# $2 = group_id    (int | None)
-# $3 = fts query   (str | None)
+# $1 = car_type_id        (int  | None) — when set, restricts to compatible cars
+# $2 = group_id           (int  | None)
+# $3 = fts query          (str  | None) — websearch syntax
+# $4 = part_number filter (str  | None) — ILIKE, uses idx_articles_partnum (GIN trgm)
+# $5 = manufacturer filter(str  | None) — ILIKE, uses idx_articles_mfr (btree lower())
 #
-# EXISTS semi-join on idx_compat_car_type avoids the DISTINCT step and large
-# intermediate results that IN (SELECT DISTINCT …) can produce on a 54M-row table.
+# car_type_id is optional: when NULL the EXISTS clause is skipped so the
+# endpoint can be used for cross-car part-number / manufacturer lookups.
+# At least one of the five parameters must be non-NULL (enforced in Python).
 # ---------------------------------------------------------------------------
 _WHERE = """\
     FROM autoparts_articles a
-    WHERE EXISTS (
+    WHERE ($1::integer IS NULL OR EXISTS (
         SELECT 1
         FROM   autoparts_compatible_cars
         WHERE  article_id = a.article_id
         AND    car_type_id = $1
-    )
+    ))
     AND ($2::integer IS NULL OR a.group_id = $2)
     AND ($3::text    IS NULL OR a.search_vector @@ websearch_to_tsquery('simple', $3))
+    AND ($4::text    IS NULL OR a.part_number ILIKE '%' || $4 || '%')
+    AND ($5::text    IS NULL OR lower(a.article_manufacturer) = lower($5))
 """
 
 _COUNT_SQL = f"SELECT COUNT(*) {_WHERE}"
@@ -49,7 +54,7 @@ _SEARCH_SQL = f"""
         a.thumbnail_url
     {_WHERE}
     ORDER BY a.is_oem DESC, a.article_manufacturer, a.part_name
-    LIMIT $4 OFFSET $5
+    LIMIT $6 OFFSET $7
 """
 
 _DETAIL_SQL = """
@@ -97,22 +102,31 @@ _COMPAT_SQL = """
 @router.get(
     "/articles/search",
     response_model=ArticleSearchResponse,
-    summary="Search articles by car type, category, and/or keyword",
+    summary="Search articles by car type, part number, manufacturer, category, and/or keyword",
 )
 async def search_articles(
-    car_type_id: int = Query(..., description="Car type ID — required (from /sync/car-types)"),
+    car_type_id: int | None = Query(None, description="Car type ID (from /sync/car-types) — restricts results to compatible articles"),
     group_id: int | None = Query(None, description="Filter by part category group_id"),
     q: str | None = Query(None, description="Free-text search across part name and number"),
+    part_number: str | None = Query(None, description="Partial part number match (case-insensitive)"),
+    article_manufacturer: str | None = Query(None, description="Exact manufacturer name match (case-insensitive)"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(20, ge=1, le=100, description="Results per page (max 100)"),
     pool: asyncpg.Pool = Depends(db_pool),
 ) -> ArticleSearchResponse:
     q_clean = q.strip() or None if q else None
+    pn_clean = part_number.strip() or None if part_number else None
+    mfr_clean = article_manufacturer.strip() or None if article_manufacturer else None
 
-    # Single connection — COUNT then SELECT sequentially (1 connection per request)
+    if not any([car_type_id, q_clean, pn_clean, mfr_clean]):
+        raise HTTPException(
+            status_code=400,
+            detail="At least one search parameter is required: car_type_id, q, part_number, or article_manufacturer",
+        )
+
     async with pool.acquire() as conn:
-        total = (await conn.fetchval(_COUNT_SQL, car_type_id, group_id, q_clean)) or 0
-        rows = await conn.fetch(_SEARCH_SQL, car_type_id, group_id, q_clean, limit, offset)
+        total = (await conn.fetchval(_COUNT_SQL, car_type_id, group_id, q_clean, pn_clean, mfr_clean)) or 0
+        rows = await conn.fetch(_SEARCH_SQL, car_type_id, group_id, q_clean, pn_clean, mfr_clean, limit, offset)
 
     return ArticleSearchResponse(
         total=total,
