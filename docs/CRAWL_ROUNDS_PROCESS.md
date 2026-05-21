@@ -21,11 +21,16 @@ All commands run on the Hetzner server as the `odoo` user unless noted otherwise
 ### Step 0 — Check disk space before starting
 
 ```bash
-df -h /
+df -h / /mnt/backups
 ```
 
-You need at least **20 GB free** before starting a new round.
-If less, jump to Step 4 (convert + rsync) to free space first.
+| Volume | Purpose | Minimum free needed |
+|---|---|---|
+| `/` (root, ~75 GB) | JSONL output, parquet, venv | **25 GB** before crawl |
+| `/mnt/backups` (65 GB) | DuckDB temp, chunk convert | **10 GB** before convert |
+
+If root is below 25 GB free, jump to Step 4 (convert + rsync) to free space first.
+`/mnt/backups` is a dedicated volume — safe to use for large temp files without risking the OS disk.
 
 ---
 
@@ -91,33 +96,58 @@ Replace `rN` with the round number (e.g. `r4`, `r5`).
 
 `scrap-auto convert` processes entities in order: manufacturers, models, car_types, car_type_details, category_groups, articles, article_details. **All entities before article_details are converted first.** If article_details fails with OOM, the others are already safe.
 
-**If `article_details` conversion fails with OOM**, use the chunked method:
+**If `article_details` conversion fails with OOM**, use the streaming Python method.
+This processes 300 lines at a time (~200 MB/chunk), stores each temp chunk on `/mnt/backups`
+(not `/tmp`), and is resume-safe — already-converted parts are skipped.
+
+Replace `DATE` with the current round label (e.g. `2026-05-21-r7`):
 
 ```bash
-mkdir -p /tmp/duckdb_convert
-mkdir -p data/parquet/entity_type=article_details/crawl_date=2026-05-18-rN
-split -l 1000 -d data/article_details.jsonl /tmp/ad_rN_chunk_
+mkdir -p /mnt/backups/duckdb_temp
+python3 - <<'PYEOF'
+import duckdb, os
+from pathlib import Path
 
-chunk_num=0
-for f in $(ls /tmp/ad_rN_chunk_* | sort); do
-    out="data/parquet/entity_type=article_details/crawl_date=2026-05-18-rN/part-$(printf '%04d' $chunk_num).parquet"
-    python3 - "$f" "$out" <<'PYEOF'
-import sys, duckdb
-src, dst = sys.argv[1], sys.argv[2]
-con = duckdb.connect()
-con.execute("SET memory_limit='2GB'")
-con.execute("SET temp_directory='/tmp/duckdb_convert'")
-con.execute("SET preserve_insertion_order=false")
-con.execute("SET threads=2")
-con.execute(f"""COPY (SELECT * FROM read_ndjson('{src}', auto_detect=True, maximum_object_size=33554432)) TO '{dst}' (FORMAT PARQUET, COMPRESSION ZSTD)""")
-con.close()
-print(f"Done: {dst}")
+src   = 'data/article_details.jsonl'
+DATE  = '2026-05-21-r7'              # <-- change per round
+out_dir = Path(f'data/parquet/entity_type=article_details/crawl_date={DATE}')
+out_dir.mkdir(parents=True, exist_ok=True)
+tmp   = '/mnt/backups/ad_chunk.jsonl'
+CHUNK = 300
+
+with open(src) as fh:
+    lines = fh.readlines()
+
+total   = len(lines)
+n_parts = (total + CHUNK - 1) // CHUNK
+print(f"{total} lines → {n_parts} chunks of {CHUNK}")
+
+for i in range(n_parts):
+    out = out_dir / f'part-{i:04d}.parquet'
+    if out.exists():
+        print(f"  part {i:04d}/{n_parts-1:04d} already exists — skip")
+        continue
+    with open(tmp, 'w') as cf:
+        cf.writelines(lines[i*CHUNK : (i+1)*CHUNK])
+    con = duckdb.connect()
+    con.execute("SET memory_limit='1500MB'")
+    con.execute("SET temp_directory='/mnt/backups/duckdb_temp'")
+    con.execute("SET threads=1")
+    con.execute(
+        f"COPY (SELECT * FROM read_ndjson('{tmp}', auto_detect=True, maximum_object_size=33554432))"
+        f" TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    )
+    con.close()
+    os.unlink(tmp)
+    if (i+1) % 20 == 0 or i == n_parts-1:
+        print(f"  part {i:04d}/{n_parts-1:04d} done ({(i+1)*100//n_parts}%)")
+
+print(f"Done — {n_parts} parts in {out_dir}")
 PYEOF
-    rm "$f"
-    chunk_num=$((chunk_num + 1))
-done
-echo "All $chunk_num chunks done"
 ```
+
+**Why not `split`?** `split` writes all chunks to disk at once, which can fill `/tmp` for a 21 GB file.
+The Python script writes one 200 MB chunk, converts it, deletes it, then moves to the next.
 
 ---
 
@@ -145,17 +175,23 @@ Verify at least 40 GB free before proceeding.
 
 ### Step 5 — Dedup across ALL rounds
 
-Clear any root-owned temp dir first, then run the dedup command which now covers all 7 entity types.
+Remove any zero-byte parquet files left by failed convert attempts, then run dedup.
 
 ```bash
-sudo rm -rf /tmp/duckdb_dedup
+# Remove 0-byte parquet files (leftover from interrupted converts)
+find data/parquet/entity_type=article_details -name "*.parquet" -size 0 -delete
+echo "0-byte cleanup done"
+
 cd /opt/scrap_auto
 source venv/bin/activate
 
-scrap-auto dedup
+scrap-auto dedup --memory-limit 6GB --temp-dir /mnt/backups/duckdb_dedup
 ```
 
 This handles in order: `manufacturers`, `models`, `car_types`, `car_type_details`, `category_groups`, `articles`, `article_details`. All produce `data/parquet/<entity>_deduped.parquet`.
+
+Use `--temp-dir /mnt/backups/duckdb_dedup` (not `/tmp`) — the 65 GB backup volume has room for
+DuckDB spill-to-disk without risking the root filesystem.
 
 **If `article_details` dedup fails with OOM**, the first 6 entities are already done. Run the streaming fallback for article_details only:
 
@@ -168,7 +204,7 @@ from pathlib import Path
 
 data_dir = Path('data/parquet')
 out = data_dir / 'article_details_deduped.parquet'
-tmp_dir = Path('/tmp/dedup_parts')
+tmp_dir = Path('/mnt/backups/dedup_parts')
 tmp_dir.mkdir(exist_ok=True)
 
 files = sorted(glob.glob(str(data_dir / 'entity_type=article_details/**/*.parquet'), recursive=True))
@@ -180,7 +216,7 @@ tmp_files = []
 for i, f in enumerate(files):
     con = duckdb.connect()
     con.execute("SET memory_limit='5GB'")
-    con.execute("SET temp_directory='/tmp/duckdb_dedup'")
+    con.execute("SET temp_directory='/mnt/backups/duckdb_dedup'")
     con.execute("SET preserve_insertion_order=false")
     con.execute("SET threads=1")
     try:
@@ -411,14 +447,52 @@ as new rows with generated IDs so model_series can always link to a manufacturer
 
 ## Disk Space Reference
 
-| File | Typical size |
-|---|---|
-| `article_details.jsonl` per round | 5–50 GB |
-| Parquet per round (compressed) | ~10–20% of JSONL |
-| `article_details_deduped.parquet` | ~500 MB–2 GB |
-| `articles_deduped.parquet` | ~50 MB |
+### Server volumes
 
-**Rule:** Never let disk exceed 80% before converting and rsyncing.
+| Volume | Size | Used for |
+|---|---|---|
+| `/` root (SSD) | ~75 GB | OS, venv, JSONL output, parquet files |
+| `/mnt/backups` | 65 GB | DuckDB temp (dedup/convert), article chunk temp |
+
+### Typical file sizes
+
+| File | Typical size | Notes |
+|---|---|---|
+| `article_details.jsonl` per round | 5–25 GB | r6 = 21 GB (30,620 lines) |
+| Parquet per round (compressed, zstd) | 10–20% of JSONL | r6 = ~2.5 GB across 103 parts |
+| `article_details_deduped.parquet` | ~1–3 GB | grows with each round |
+| `articles_deduped.parquet` | ~50 MB | |
+| DuckDB dedup spill (`/mnt/backups`) | up to 10 GB | cleared after dedup |
+| Per-chunk temp (`/mnt/backups/ad_chunk.jsonl`) | ~200 MB | deleted after each part |
+
+**Rule:** Never let root disk exceed 80% (`≥ 60 GB used` on a 75 GB disk) before converting and rsyncing JSONL to the Storage Box.
+
+---
+
+## Data Volume History
+
+Counts after each `scrap-auto load` (PostgreSQL row counts). Dimension tables stabilise after
+round 1–2 since the same manufacturers/models/car-types are re-traversed.
+
+| Round | Date | articles | article_details | compatible_cars | Notes |
+|---|---|---|---|---|---|
+| r1–r5 | ≤ 2026-05-20 | 75,652 | 75,585 | 54,448,200 | Initial rounds |
+| r6 | 2026-05-21 | ~91,852 | 91,852 | TBD after verify | +16k new article_details; 21 GB JSONL, chunked convert |
+| r7 | — | — | — | — | Next |
+
+Dimension tables after r5/r6 load (stable):
+
+| Table | Count |
+|---|---|
+| `autoparts_manufacturers` | 1,004 |
+| `autoparts_model_series` | 16,586 |
+| `autoparts_car_types` | 83,012 |
+| `autoparts_car_type_details` | 59,644 |
+| `autoparts_groups` | 803 |
+
+**Coverage note:** `car_type_details` covers 71.8% of `car_types` (59,644 / 83,012). The remaining
+28.2% have no detail page on the source site — `COALESCE(ctd.car_type_title, ct.type_label)` in
+the API provides a fallback title for all car types.
 
 ---
 
