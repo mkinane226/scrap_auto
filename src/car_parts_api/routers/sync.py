@@ -180,9 +180,7 @@ async def compat_manufacturers(
 ) -> list[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT DISTINCT manufacturer_name "
-            "FROM autoparts_compatible_cars "
-            "ORDER BY manufacturer_name"
+            "SELECT manufacturer_name FROM autoparts_compat_manufacturers ORDER BY manufacturer_name"
         )
     return [r["manufacturer_name"] for r in rows]
 
@@ -198,10 +196,8 @@ async def compat_models(
 ) -> list[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT DISTINCT model_name "
-            "FROM autoparts_compatible_cars "
-            "WHERE manufacturer_name = $1 "
-            "ORDER BY model_name",
+            "SELECT model_name FROM autoparts_compat_models "
+            "WHERE manufacturer_name = $1 ORDER BY model_name",
             manufacturer_name.strip().upper(),
         )
     return [r["model_name"] for r in rows]
