@@ -245,6 +245,44 @@ def _guess_ext(url: str) -> str:
     return ".bin"
 
 
+def _convert_jsonl_streaming(src: Path, dest: Path, batch_size: int = 500) -> None:
+    """Read JSONL in fixed-size batches and write Parquet incrementally via PyArrow.
+
+    Used as a fallback when DuckDB OOMs on large files (e.g. article_details).
+    Peak RAM per call is proportional to batch_size rows, not file size.
+    """
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    writer: pq.ParquetWriter | None = None
+    batch: list[dict] = []
+
+    try:
+        with src.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                batch.append(json.loads(line))
+                if len(batch) >= batch_size:
+                    table = pa.Table.from_pylist(batch)
+                    if writer is None:
+                        writer = pq.ParquetWriter(dest, table.schema, compression="zstd")
+                    writer.write_table(table)
+                    batch.clear()
+
+        if batch:
+            table = pa.Table.from_pylist(batch)
+            if writer is None:
+                writer = pq.ParquetWriter(dest, table.schema, compression="zstd")
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+
+
 @app.command()
 def convert(
     data_dir: str = typer.Option("data", help="Directory containing JSONL output files."),
@@ -308,7 +346,12 @@ def convert(
             con.close()
             console.print(f"[green]Done[/green] {entity}")
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[red]Failed {entity}[/red] :: {exc}")
+            console.print(f"[yellow]DuckDB failed ({exc.__class__.__name__}), retrying with PyArrow streaming...[/yellow]")
+            try:
+                _convert_jsonl_streaming(src, dest)
+                console.print(f"[green]Done[/green] {entity} [dim](streaming fallback)[/dim]")
+            except Exception as exc2:  # noqa: BLE001
+                console.print(f"[red]Failed {entity}[/red] :: {exc2}")
 
     console.print("[bold green]Conversion complete[/bold green]")
 
