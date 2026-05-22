@@ -18,23 +18,22 @@ router = APIRouter(tags=["articles"], dependencies=[Depends(require_api_key)])
 # ---------------------------------------------------------------------------
 # SQL helpers
 # ---------------------------------------------------------------------------
-# $1 = car_type_id        (int  | None) — when set, restricts to compatible cars
+# $1 = car_type_ids      (int[]| None) — ANY($1) match; NULL skips the EXISTS clause
 # $2 = group_id           (int  | None)
 # $3 = fts query          (str  | None) — websearch syntax
 # $4 = part_number filter (str  | None) — ILIKE, uses idx_articles_partnum (GIN trgm)
-# $5 = manufacturer filter(str  | None) — ILIKE, uses idx_articles_mfr (btree lower())
+# $5 = manufacturer filter(str  | None) — exact lower(), uses idx_articles_mfr
 #
-# car_type_id is optional: when NULL the EXISTS clause is skipped so the
-# endpoint can be used for cross-car part-number / manufacturer lookups.
+# Passing a single-element list [car_type_id] is equivalent to the old scalar form.
 # At least one of the five parameters must be non-NULL (enforced in Python).
 # ---------------------------------------------------------------------------
 _WHERE = """\
     FROM autoparts_articles a
-    WHERE ($1::integer IS NULL OR EXISTS (
+    WHERE ($1::integer[] IS NULL OR EXISTS (
         SELECT 1
         FROM   autoparts_compatible_cars
         WHERE  article_id = a.article_id
-        AND    car_type_id = $1
+        AND    car_type_id = ANY($1)
     ))
     AND ($2::integer IS NULL OR a.group_id = $2)
     AND ($3::text    IS NULL OR a.search_vector @@ websearch_to_tsquery('simple', $3))
@@ -79,35 +78,30 @@ _DETAIL_SQL = """
 # ---------------------------------------------------------------------------
 # SQL — reverse search: enter through compatible_cars → articles
 # ---------------------------------------------------------------------------
-# Strategy: start from idx_compat_lookup (manufacturer_name, model_name) on the
-# 54M-row compatible_cars table, materialise DISTINCT article_ids, then JOIN to
-# the 91k-row articles table.  This is much faster than an EXISTS loop over
-# articles because:
-#   - The index narrows compatible_cars to the specific make/model first.
-#   - DISTINCT on that narrow set is cheap.
-#   - The final articles fetch is a small PK lookup.
+# Accepts either ID-based or name-based car identification — both are optional
+# independently, but at least one of (model_series_id, manufacturer_name) must
+# be non-NULL (enforced in Python) to avoid a full 54M-row seq-scan.
 #
-# manufacturer_name is required (index leading column — without it the planner
-# falls back to a seq-scan of 54M rows).  model_name and year narrow further.
+# ID path (preferred — uses idx_compat_article / idx_compat_car_type directly):
+#   $1 = model_series_id   (int | NULL)
 #
-# Recommended covering index for maximum speed on the DISTINCT step:
-#   CREATE INDEX CONCURRENTLY idx_compat_mfr_model_article
-#       ON autoparts_compatible_cars (manufacturer_name, model_name)
-#       INCLUDE (article_id);
+# Name path (uses idx_compat_lookup leading column):
+#   $2 = manufacturer_name (text | NULL, uppercase)
+#   $3 = model_name        (text | NULL, uppercase)
 #
-# $1 = manufacturer_name (text, required, uppercase)
-# $2 = model_name        (text | NULL, uppercase)
-# $3 = year              (text | NULL, e.g. '2015') — year_from ≤ year ≤ year_to
-# $4 = group_id          (int  | NULL)
+# Common filters:
+#   $4 = year  (text | NULL, e.g. '2015') — LEFT(year_from/to, 4) comparison
+#              handles YYYY-MM-DD stored dates correctly
 # ---------------------------------------------------------------------------
 _BY_CAR_IDS = """\
     SELECT DISTINCT article_id
     FROM   autoparts_compatible_cars
-    WHERE  manufacturer_name = $1
-    AND    ($2::text IS NULL OR model_name = $2)
-    AND    ($3::text IS NULL OR (
-               year_from != '' AND LEFT(year_from, 4) <= $3
-               AND (year_to = '' OR LEFT(year_to, 4) >= $3)
+    WHERE  ($1::integer IS NULL OR model_series_id   = $1)
+    AND    ($2::text    IS NULL OR manufacturer_name = $2)
+    AND    ($3::text    IS NULL OR model_name        = $3)
+    AND    ($4::text    IS NULL OR (
+               year_from != '' AND LEFT(year_from, 4) <= $4
+               AND (year_to = '' OR LEFT(year_to, 4) >= $4)
            ))
 """
 
@@ -115,7 +109,7 @@ _BY_CAR_COUNT_SQL = f"""
     SELECT COUNT(*)
     FROM   autoparts_articles a
     WHERE  a.article_id IN ({_BY_CAR_IDS})
-    AND    ($4::integer IS NULL OR a.group_id = $4)
+    AND    ($5::integer IS NULL OR a.group_id = $5)
 """
 
 _BY_CAR_SEARCH_SQL = f"""
@@ -129,9 +123,9 @@ _BY_CAR_SEARCH_SQL = f"""
         a.thumbnail_url
     FROM   autoparts_articles a
     WHERE  a.article_id IN ({_BY_CAR_IDS})
-    AND    ($4::integer IS NULL OR a.group_id = $4)
+    AND    ($5::integer IS NULL OR a.group_id = $5)
     ORDER BY a.is_oem DESC, a.article_manufacturer, a.part_name
-    LIMIT $5 OFFSET $6
+    LIMIT $6 OFFSET $7
 """
 
 _GROUPS_FOR_CAR_SQL = """
@@ -185,7 +179,7 @@ _COMPAT_SQL = """
     summary="Search articles by car type, part number, manufacturer, category, and/or keyword",
 )
 async def search_articles(
-    car_type_id: int | None = Query(None, description="Car type ID (from /sync/car-types) — restricts results to compatible articles"),
+    car_type_ids: list[int] | None = Query(None, description="Car type ID(s) — repeat the param for multiple variants, e.g. ?car_type_ids=1&car_type_ids=2"),
     group_id: int | None = Query(None, description="Filter by part category group_id"),
     q: str | None = Query(None, description="Free-text search across part name and number"),
     part_number: str | None = Query(None, description="Partial part number match (case-insensitive)"),
@@ -197,16 +191,17 @@ async def search_articles(
     q_clean = q.strip() or None if q else None
     pn_clean = part_number.strip() or None if part_number else None
     mfr_clean = article_manufacturer.strip() or None if article_manufacturer else None
+    ids = car_type_ids or None  # empty list → None so EXISTS clause is skipped
 
-    if not any([car_type_id, q_clean, pn_clean, mfr_clean]):
+    if not any([ids, q_clean, pn_clean, mfr_clean]):
         raise HTTPException(
             status_code=400,
-            detail="At least one search parameter is required: car_type_id, q, part_number, or article_manufacturer",
+            detail="At least one search parameter is required: car_type_ids, q, part_number, or article_manufacturer",
         )
 
     async with pool.acquire() as conn:
-        total = (await conn.fetchval(_COUNT_SQL, car_type_id, group_id, q_clean, pn_clean, mfr_clean)) or 0
-        rows = await conn.fetch(_SEARCH_SQL, car_type_id, group_id, q_clean, pn_clean, mfr_clean, limit, offset)
+        total = (await conn.fetchval(_COUNT_SQL, ids, group_id, q_clean, pn_clean, mfr_clean)) or 0
+        rows = await conn.fetch(_SEARCH_SQL, ids, group_id, q_clean, pn_clean, mfr_clean, limit, offset)
 
     return ArticleSearchResponse(
         total=total,
@@ -222,23 +217,29 @@ async def search_articles(
     summary="Search articles by compatible car specs (manufacturer, model, year) — reverse lookup through compatible_cars",
 )
 async def articles_by_car(
-    manufacturer_name: str = Query(..., description="Vehicle manufacturer name (e.g. FORD, VOLKSWAGEN) — case-insensitive, matched exactly after uppercasing"),
-    model_name: str | None = Query(None, description="Model name (e.g. FOCUS, GOLF) — optional, case-insensitive"),
-    year: str | None = Query(None, description="Production year (e.g. 2015) — filters to cars produced that year"),
+    model_series_id: int | None = Query(None, description="Model series ID (from /sync/model-series) — ID-based lookup, faster than name"),
+    manufacturer_name: str | None = Query(None, description="Manufacturer name (from /sync/compat-manufacturers) — required when model_series_id is not provided"),
+    model_name: str | None = Query(None, description="Model name (from /sync/compat-models) — optional name filter"),
+    year: str | None = Query(None, description="Production year, e.g. 2015 — filters to cars produced that year"),
     group_id: int | None = Query(None, description="Restrict results to a specific part category group_id"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(20, ge=1, le=100, description="Results per page (max 100)"),
     pool: asyncpg.Pool = Depends(db_pool),
 ) -> ArticleSearchResponse:
+    if not model_series_id and not manufacturer_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one of: model_series_id or manufacturer_name",
+        )
     if year is not None and (not year.isdigit() or len(year) != 4):
         raise HTTPException(status_code=400, detail="year must be a 4-digit string, e.g. '2015'")
 
-    mfr = manufacturer_name.strip().upper()
+    mfr = manufacturer_name.strip().upper() if manufacturer_name else None
     mdl = model_name.strip().upper() if model_name else None
 
     async with pool.acquire() as conn:
-        total = (await conn.fetchval(_BY_CAR_COUNT_SQL, mfr, mdl, year, group_id)) or 0
-        rows = await conn.fetch(_BY_CAR_SEARCH_SQL, mfr, mdl, year, group_id, limit, offset)
+        total = (await conn.fetchval(_BY_CAR_COUNT_SQL, model_series_id, mfr, mdl, year, group_id)) or 0
+        rows = await conn.fetch(_BY_CAR_SEARCH_SQL, model_series_id, mfr, mdl, year, group_id, limit, offset)
 
     return ArticleSearchResponse(
         total=total,

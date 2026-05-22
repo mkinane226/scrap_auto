@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncpg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..deps import db_pool, require_api_key
 from ..schemas.common import Page
-from ..schemas.sync import CarTypeOut, GroupOut, ManufacturerOut, ModelSeriesOut
+from ..schemas.sync import CarTypeOut, GroupOut, ManufacturerOut, ModelSeriesOut, StatsOut
 
 router = APIRouter(
     prefix="/sync",
@@ -164,6 +164,33 @@ async def sync_groups(
 
 
 # ---------------------------------------------------------------------------
+# Statistics
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/statistics",
+    response_model=StatsOut,
+    summary="Row counts for all core tables — useful for sync wizard dashboards",
+)
+async def sync_statistics(
+    pool: asyncpg.Pool = Depends(db_pool),
+) -> StatsOut:
+    async with pool.acquire() as conn:
+        manufacturers  = await conn.fetchval("SELECT COUNT(*) FROM autoparts_manufacturers")  or 0
+        model_series   = await conn.fetchval("SELECT COUNT(*) FROM autoparts_model_series")   or 0
+        car_types      = await conn.fetchval("SELECT COUNT(*) FROM autoparts_car_types")      or 0
+        articles       = await conn.fetchval("SELECT COUNT(*) FROM autoparts_articles")       or 0
+        compatible_cars = await conn.fetchval("SELECT COUNT(*) FROM autoparts_compatible_cars") or 0
+    return StatsOut(
+        manufacturers=manufacturers,
+        model_series=model_series,
+        car_types=car_types,
+        articles=articles,
+        compatible_cars=compatible_cars,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Compatible-cars discovery  (manufacturer names & model names as they are
 # stored in autoparts_compatible_cars — these may differ from the normalized
 # names in autoparts_manufacturers / autoparts_model_series, so callers
@@ -191,10 +218,23 @@ async def compat_manufacturers(
     summary="Distinct model names for a manufacturer in compatible_cars — use these for /articles/by-car",
 )
 async def compat_models(
-    manufacturer_name: str = Query(..., description="Manufacturer name from /sync/compat-manufacturers"),
+    manufacturer_name: str | None = Query(None, description="Manufacturer name from /sync/compat-manufacturers"),
+    manufacturer_id: int | None = Query(None, description="Manufacturer ID from /sync/manufacturers — resolved to name automatically"),
     pool: asyncpg.Pool = Depends(db_pool),
 ) -> list[str]:
+    if not manufacturer_name and not manufacturer_id:
+        raise HTTPException(status_code=400, detail="Provide manufacturer_name or manufacturer_id")
+
     async with pool.acquire() as conn:
+        if manufacturer_id and not manufacturer_name:
+            resolved = await conn.fetchval(
+                "SELECT UPPER(manufacturer_name) FROM autoparts_manufacturers WHERE manufacturer_id = $1",
+                manufacturer_id,
+            )
+            if resolved is None:
+                raise HTTPException(status_code=404, detail=f"Manufacturer {manufacturer_id} not found")
+            manufacturer_name = resolved
+
         rows = await conn.fetch(
             "SELECT model_name FROM autoparts_compat_models "
             "WHERE manufacturer_name = $1 ORDER BY model_name",

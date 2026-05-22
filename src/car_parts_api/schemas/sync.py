@@ -39,3 +39,11 @@ class GroupOut(BaseModel):
     primary_group_name: str
     subcategory_name: str
     sub_subcategory_name: str
+
+
+class StatsOut(BaseModel):
+    manufacturers: int
+    model_series: int
+    car_types: int
+    articles: int
+    compatible_cars: int
