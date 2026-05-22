@@ -8,3 +8,4 @@ data/
 .vs/
 .claude/settings.local.json
 .claude/*
+docs/I2DOO_SAAS_DEPLOYMENT_GUIDE.md
