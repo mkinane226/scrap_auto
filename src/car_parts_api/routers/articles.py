@@ -76,6 +76,64 @@ _DETAIL_SQL = """
     WHERE a.article_id = $1
 """
 
+# ---------------------------------------------------------------------------
+# SQL — reverse search: enter through compatible_cars → articles
+# ---------------------------------------------------------------------------
+# Strategy: start from idx_compat_lookup (manufacturer_name, model_name) on the
+# 54M-row compatible_cars table, materialise DISTINCT article_ids, then JOIN to
+# the 91k-row articles table.  This is much faster than an EXISTS loop over
+# articles because:
+#   - The index narrows compatible_cars to the specific make/model first.
+#   - DISTINCT on that narrow set is cheap.
+#   - The final articles fetch is a small PK lookup.
+#
+# manufacturer_name is required (index leading column — without it the planner
+# falls back to a seq-scan of 54M rows).  model_name and year narrow further.
+#
+# Recommended covering index for maximum speed on the DISTINCT step:
+#   CREATE INDEX CONCURRENTLY idx_compat_mfr_model_article
+#       ON autoparts_compatible_cars (manufacturer_name, model_name)
+#       INCLUDE (article_id);
+#
+# $1 = manufacturer_name (text, required, uppercase)
+# $2 = model_name        (text | NULL, uppercase)
+# $3 = year              (text | NULL, e.g. '2015') — year_from ≤ year ≤ year_to
+# $4 = group_id          (int  | NULL)
+# ---------------------------------------------------------------------------
+_BY_CAR_IDS = """\
+    SELECT DISTINCT article_id
+    FROM   autoparts_compatible_cars
+    WHERE  manufacturer_name = $1
+    AND    ($2::text IS NULL OR model_name = $2)
+    AND    ($3::text IS NULL OR (
+               year_from != '' AND LEFT(year_from, 4) <= $3
+               AND (year_to = '' OR LEFT(year_to, 4) >= $3)
+           ))
+"""
+
+_BY_CAR_COUNT_SQL = f"""
+    SELECT COUNT(*)
+    FROM   autoparts_articles a
+    WHERE  a.article_id IN ({_BY_CAR_IDS})
+    AND    ($4::integer IS NULL OR a.group_id = $4)
+"""
+
+_BY_CAR_SEARCH_SQL = f"""
+    SELECT
+        a.article_id,
+        a.part_name,
+        a.part_number,
+        a.article_manufacturer,
+        a.group_id,
+        a.is_oem,
+        a.thumbnail_url
+    FROM   autoparts_articles a
+    WHERE  a.article_id IN ({_BY_CAR_IDS})
+    AND    ($4::integer IS NULL OR a.group_id = $4)
+    ORDER BY a.is_oem DESC, a.article_manufacturer, a.part_name
+    LIMIT $5 OFFSET $6
+"""
+
 _GROUPS_FOR_CAR_SQL = """
     SELECT
         g.group_id,
@@ -149,6 +207,38 @@ async def search_articles(
     async with pool.acquire() as conn:
         total = (await conn.fetchval(_COUNT_SQL, car_type_id, group_id, q_clean, pn_clean, mfr_clean)) or 0
         rows = await conn.fetch(_SEARCH_SQL, car_type_id, group_id, q_clean, pn_clean, mfr_clean, limit, offset)
+
+    return ArticleSearchResponse(
+        total=total,
+        offset=offset,
+        limit=limit,
+        results=[ArticleResult.model_validate(dict(r)) for r in rows],
+    )
+
+
+@router.get(
+    "/articles/by-car",
+    response_model=ArticleSearchResponse,
+    summary="Search articles by compatible car specs (manufacturer, model, year) — reverse lookup through compatible_cars",
+)
+async def articles_by_car(
+    manufacturer_name: str = Query(..., description="Vehicle manufacturer name (e.g. FORD, VOLKSWAGEN) — case-insensitive, matched exactly after uppercasing"),
+    model_name: str | None = Query(None, description="Model name (e.g. FOCUS, GOLF) — optional, case-insensitive"),
+    year: str | None = Query(None, description="Production year (e.g. 2015) — filters to cars produced that year"),
+    group_id: int | None = Query(None, description="Restrict results to a specific part category group_id"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(20, ge=1, le=100, description="Results per page (max 100)"),
+    pool: asyncpg.Pool = Depends(db_pool),
+) -> ArticleSearchResponse:
+    if year is not None and (not year.isdigit() or len(year) != 4):
+        raise HTTPException(status_code=400, detail="year must be a 4-digit string, e.g. '2015'")
+
+    mfr = manufacturer_name.strip().upper()
+    mdl = model_name.strip().upper() if model_name else None
+
+    async with pool.acquire() as conn:
+        total = (await conn.fetchval(_BY_CAR_COUNT_SQL, mfr, mdl, year, group_id)) or 0
+        rows = await conn.fetch(_BY_CAR_SEARCH_SQL, mfr, mdl, year, group_id, limit, offset)
 
     return ArticleSearchResponse(
         total=total,

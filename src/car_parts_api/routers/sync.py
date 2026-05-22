@@ -161,3 +161,47 @@ async def sync_groups(
             """
         )
     return [GroupOut.model_validate(dict(r)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Compatible-cars discovery  (manufacturer names & model names as they are
+# stored in autoparts_compatible_cars — these may differ from the normalized
+# names in autoparts_manufacturers / autoparts_model_series, so callers
+# must use these endpoints to drive /articles/by-car lookups)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/compat-manufacturers",
+    response_model=list[str],
+    summary="Distinct manufacturer names in compatible_cars — use these for /articles/by-car",
+)
+async def compat_manufacturers(
+    pool: asyncpg.Pool = Depends(db_pool),
+) -> list[str]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT manufacturer_name "
+            "FROM autoparts_compatible_cars "
+            "ORDER BY manufacturer_name"
+        )
+    return [r["manufacturer_name"] for r in rows]
+
+
+@router.get(
+    "/compat-models",
+    response_model=list[str],
+    summary="Distinct model names for a manufacturer in compatible_cars — use these for /articles/by-car",
+)
+async def compat_models(
+    manufacturer_name: str = Query(..., description="Manufacturer name from /sync/compat-manufacturers"),
+    pool: asyncpg.Pool = Depends(db_pool),
+) -> list[str]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT model_name "
+            "FROM autoparts_compatible_cars "
+            "WHERE manufacturer_name = $1 "
+            "ORDER BY model_name",
+            manufacturer_name.strip().upper(),
+        )
+    return [r["model_name"] for r in rows]
